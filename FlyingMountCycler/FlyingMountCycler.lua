@@ -166,6 +166,29 @@ local function summonNextFavoriteMount()
     end
 end
 
+local COMBAT_NO_MOUNT_MSG = "Cannot mount in combat."
+
+local function warnCannotMountInCombat()
+    printMessage(COMBAT_NO_MOUNT_MSG, true)
+    UIErrorsFrame:AddMessage(COMBAT_NO_MOUNT_MSG, 1.0, 0.25, 0.25)
+end
+
+--- Dismiss current mount (SummonByID toggles off when already active; works from user-initiated slash).
+local function dismountIfMounted()
+    if not IsMounted() then
+        return
+    end
+    local getSummoned = C_MountJournal.GetSummonedMountID
+    if getSummoned then
+        local mountID = getSummoned()
+        if mountID and mountID > 0 then
+            C_MountJournal.SummonByID(mountID)
+            return
+        end
+    end
+    pcall(Dismount)
+end
+
 local function resetCycle()
     db.remainingMountIDs = {
         flying = {},
@@ -305,6 +328,15 @@ SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
     end
     if command == "config" or command == "options" then
         openAddonSettings()
+        return
+    end
+
+    if UnitAffectingCombat("player") then
+        if IsMounted() then
+            dismountIfMounted()
+        else
+            warnCannotMountInCombat()
+        end
         return
     end
 
