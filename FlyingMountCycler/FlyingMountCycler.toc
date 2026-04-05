@@ -1,8 +1,8 @@
-## Interface: 120001, 120005
+## Interface: 120001, 120005, 120100
 ## Title: Flying Mount Cycler
-## Notes: Cycles through flying mounts without repeats until all are used.
+## Notes: Retail 12.0.1+. Cycles favorite mounts; options in Esc > Options > AddOns.
 ## Author: Yuri + Cursor
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: FlyingMountCyclerDB
 
 FlyingMountCycler.lua
