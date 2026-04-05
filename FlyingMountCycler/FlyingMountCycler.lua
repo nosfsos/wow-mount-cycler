@@ -78,6 +78,15 @@ local function ensureRemainingMountIDsShape(target)
     end
 end
 
+--- Track the full current cycle separately from the "remaining" queue so refreshes
+--- can append genuinely new mounts without re-adding mounts already used this round.
+local function ensureCycleMountIDsShape(target)
+    target.cycleMountIDs = target.cycleMountIDs or newEmptyRemainingPools()
+    for _, key in ipairs(POOL_KEYS) do
+        target.cycleMountIDs[key] = target.cycleMountIDs[key] or {}
+    end
+end
+
 local function mergeDefaults(target)
     target.options = target.options or {}
     local o = target.options
@@ -165,6 +174,31 @@ local function retainOnlyCurrentPool(remaining, poolLookup)
     return filtered
 end
 
+local function appendMissingMountsToRemaining(remaining, pool)
+    local remainingLookup = poolToLookup(remaining)
+    local addedCount = 0
+    for i = 1, #pool do
+        local mountID = pool[i]
+        if not remainingLookup[mountID] then
+            remaining[#remaining + 1] = mountID
+            remainingLookup[mountID] = true
+            addedCount = addedCount + 1
+        end
+    end
+    return addedCount
+end
+
+local function appendArray(target, values)
+    for i = 1, #values do
+        target[#target + 1] = values[i]
+    end
+end
+
+-- Forward declarations used by cycle-sync helpers.
+local getActiveMountID
+local isFavoriteInPoolIgnoringUsable
+local rebuildCycleIfNeeded
+
 --- summonKind: "flying" | "ground" | "any"
 local function buildFavoritePool(summonKind)
     local pool = {}
@@ -194,8 +228,27 @@ local function buildFavoritePool(summonKind)
     return pool
 end
 
+--- While mounted, the active mount may report unusable; preserve it in cycle-sync pools.
+local function buildCycleTrackedFavoritePool(summonKind)
+    local pool = buildFavoritePool(summonKind)
+    if not IsMounted() then
+        return pool
+    end
+
+    local activeMountID = getActiveMountID()
+    if not activeMountID or not isFavoriteInPoolIgnoringUsable(summonKind, activeMountID) then
+        return pool
+    end
+
+    local poolLookup = poolToLookup(pool)
+    if not poolLookup[activeMountID] then
+        pool[#pool + 1] = activeMountID
+    end
+    return pool
+end
+
 --- Resolve current mount ID robustly (journal API can briefly return 0 on mount change).
-local function getActiveMountID()
+getActiveMountID = function()
     local getSummoned = C_MountJournal.GetSummonedMountID
     if getSummoned then
         local mountID = getSummoned()
@@ -215,11 +268,8 @@ local function getActiveMountID()
     return nil
 end
 
--- Forward declaration (used by mount-cycle sync helpers below).
-local rebuildCycleIfNeeded
-
 --- While mounted, the journal often reports isUsable = false; still match pool/type for cycle sync + chat.
-local function isFavoriteInPoolIgnoringUsable(poolKey, mountID)
+isFavoriteInPoolIgnoringUsable = function(poolKey, mountID)
     local name, _, _, _, _, _, isFavorite, _, _, shouldHideOnChar, isCollected =
         C_MountJournal.GetMountInfoByID(mountID)
     if not (name and isCollected and isFavorite and not shouldHideOnChar) then
@@ -258,7 +308,7 @@ local function removeMountFromAllCycleQueues(mountID)
     for _, poolKey in ipairs(POOL_KEYS) do
         if isFavoriteInPoolIgnoringUsable(poolKey, mountID) then
             -- Keep no-repeat queues coherent even when mounting outside /fmount.
-            local pool = buildFavoritePool(poolKey)
+            local pool = buildCycleTrackedFavoritePool(poolKey)
             if #pool > 0 then
                 rebuildCycleIfNeeded(pool, poolKey)
             end
@@ -345,11 +395,81 @@ rebuildCycleIfNeeded = function(pool, poolKey)
     local poolLookup = poolToLookup(pool)
 
     db.remainingMountIDs = db.remainingMountIDs or newEmptyRemainingPools()
-    local remaining = db.remainingMountIDs[poolKey] or {}
-    db.remainingMountIDs[poolKey] = retainOnlyCurrentPool(remaining, poolLookup)
+    db.cycleMountIDs = db.cycleMountIDs or newEmptyRemainingPools()
+
+    local trackedCycle = retainOnlyCurrentPool(db.cycleMountIDs[poolKey] or {}, poolLookup)
+    local newMounts = {}
+    if #trackedCycle == 0 then
+        trackedCycle = copyArray(pool)
+    else
+        local trackedLookup = poolToLookup(trackedCycle)
+        for i = 1, #pool do
+            local mountID = pool[i]
+            if not trackedLookup[mountID] then
+                trackedCycle[#trackedCycle + 1] = mountID
+                trackedLookup[mountID] = true
+                newMounts[#newMounts + 1] = mountID
+            end
+        end
+    end
+    db.cycleMountIDs[poolKey] = trackedCycle
+
+    local remaining = retainOnlyCurrentPool(db.remainingMountIDs[poolKey] or {}, poolLookup)
+    appendArray(remaining, newMounts)
+    db.remainingMountIDs[poolKey] = remaining
 
     if #db.remainingMountIDs[poolKey] == 0 then
-        db.remainingMountIDs[poolKey] = copyArray(pool)
+        db.remainingMountIDs[poolKey] = copyArray(trackedCycle)
+    end
+end
+
+local function refreshAvailableMounts(showChatFeedback)
+    db.remainingMountIDs = db.remainingMountIDs or newEmptyRemainingPools()
+    db.cycleMountIDs = db.cycleMountIDs or newEmptyRemainingPools()
+
+    local summaryParts = {}
+    local anyChanges = false
+    for _, poolKey in ipairs(POOL_KEYS) do
+        local pool = buildCycleTrackedFavoritePool(poolKey)
+        local poolLookup = poolToLookup(pool)
+        local previousCycle = db.cycleMountIDs[poolKey] or {}
+        local previousRemaining = db.remainingMountIDs[poolKey] or {}
+        local filteredCycle = retainOnlyCurrentPool(previousCycle, poolLookup)
+        local filteredRemaining = retainOnlyCurrentPool(previousRemaining, poolLookup)
+        local removedCount = #previousCycle - #filteredCycle
+        local addedMounts = {}
+
+        if #filteredCycle == 0 then
+            filteredCycle = copyArray(pool)
+        else
+            local filteredCycleLookup = poolToLookup(filteredCycle)
+            for i = 1, #pool do
+                local mountID = pool[i]
+                if not filteredCycleLookup[mountID] then
+                    filteredCycle[#filteredCycle + 1] = mountID
+                    filteredCycleLookup[mountID] = true
+                    addedMounts[#addedMounts + 1] = mountID
+                end
+            end
+        end
+
+        appendArray(filteredRemaining, addedMounts)
+        db.cycleMountIDs[poolKey] = filteredCycle
+        db.remainingMountIDs[poolKey] = filteredRemaining
+
+        local addedCount = #addedMounts
+        if addedCount > 0 or removedCount > 0 then
+            anyChanges = true
+            summaryParts[#summaryParts + 1] = string.format("%s: +%d / -%d", poolKey, addedCount, removedCount)
+        end
+    end
+
+    if showChatFeedback then
+        if anyChanges then
+            printMessage("Mount refresh complete. Cycle updated without resetting progress (" .. table.concat(summaryParts, ", ") .. ").")
+        else
+            printMessage("Mount refresh complete. No changes were needed.")
+        end
     end
 end
 
@@ -425,7 +545,12 @@ end
 
 local function resetCycle()
     db.remainingMountIDs = newEmptyRemainingPools()
+    db.cycleMountIDs = newEmptyRemainingPools()
     printMessage("Cycle reset. Your next summon starts a fresh round.")
+end
+
+local function forceRefreshMounts()
+    refreshAvailableMounts(true)
 end
 
 local function openAddonSettings()
@@ -551,6 +676,28 @@ local function registerSettings()
 
     Settings.RegisterAddOnCategory(category)
     settingsCategory = category
+
+    local refreshFrame = CreateFrame("Frame")
+    refreshFrame.name = "Refresh Mounts"
+
+    local title = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetText("Refresh Mount Queue")
+
+    local description = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    description:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -12)
+    description:SetWidth(520)
+    description:SetJustifyH("LEFT")
+    description:SetJustifyV("TOP")
+    description:SetText("Re-scan your currently available favorite mounts and add any newly eligible ones to the active no-repeat cycle without resetting the mounts you still have queued.")
+
+    local button = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    button:SetPoint("TOPLEFT", description, "BOTTOMLEFT", 0, -16)
+    button:SetSize(190, 24)
+    button:SetText("Refresh Available Mounts")
+    button:SetScript("OnClick", forceRefreshMounts)
+
+    Settings.RegisterCanvasLayoutSubcategory(category, refreshFrame, "Refresh Mounts")
 end
 
 --------------------------------------------------------------------------------
@@ -564,6 +711,10 @@ SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
     local command = strlower(strtrim(msg or ""))
     if command == "reset" then
         resetCycle()
+        return
+    end
+    if command == "refresh" then
+        forceRefreshMounts()
         return
     end
     if command == "config" or command == "options" then
@@ -587,20 +738,23 @@ end
 -- Lifecycle
 --------------------------------------------------------------------------------
 
-eventFrame:SetScript("OnEvent", function(_, event, loadedAddonName)
-    if event == "ADDON_LOADED" and loadedAddonName == addonName then
+eventFrame:SetScript("OnEvent", function(_, event, arg1)
+    if event == "ADDON_LOADED" and arg1 == addonName then
         FlyingMountCyclerDB = FlyingMountCyclerDB or {}
         db = FlyingMountCyclerDB
         ensureRemainingMountIDsShape(db)
+        ensureCycleMountIDsShape(db)
         mergeDefaults(db)
+        refreshAvailableMounts(false)
         registerSettings()
-        printMessage("Loaded. |cffaaaaaa/fmount|r — next mount, |cffaaaaaa/fmount reset|r — reset cycle, |cffaaaaaa/fmount config|r — options.|r")
+        printMessage("Loaded. |cffaaaaaa/fmount|r — next mount, |cffaaaaaa/fmount reset|r — reset cycle, |cffaaaaaa/fmount refresh|r — refresh mounts, |cffaaaaaa/fmount config|r — options.|r")
         return
     end
 
     if event == "PLAYER_LOGIN" then
         if db and db.options and db.options.resetCycleOnLogin then
             db.remainingMountIDs = newEmptyRemainingPools()
+            db.cycleMountIDs = newEmptyRemainingPools()
         end
         return
     end
@@ -610,7 +764,12 @@ eventFrame:SetScript("OnEvent", function(_, event, loadedAddonName)
         return
     end
 
-    if event == "UNIT_AURA" and loadedAddonName == "player" then
+    if event == "COMPANION_UPDATE" and arg1 == "MOUNT" then
+        refreshAvailableMounts(false)
+        return
+    end
+
+    if event == "UNIT_AURA" and arg1 == "player" then
         scheduleNoRepeatCycleUpdateFromMountState()
     end
 end)
@@ -618,4 +777,5 @@ end)
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
+eventFrame:RegisterEvent("COMPANION_UPDATE")
 eventFrame:RegisterEvent("UNIT_AURA")
