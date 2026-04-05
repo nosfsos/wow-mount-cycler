@@ -1,4 +1,4 @@
-## Interface: 110002
+## Interface: 120001, 120005
 ## Title: Flying Mount Cycler
 ## Notes: Cycles through flying mounts without repeats until all are used.
 ## Author: Yuri + Cursor
