@@ -79,7 +79,7 @@ end
 -- Pool building
 --------------------------------------------------------------------------------
 
-local function buildFavoritePool(summonKind)
+local function buildFavoritePool(summonKind, ignoreUsable)
     local pool = {}
     local mountIDs = C_MountJournal.GetMountIDs() or {}
     local flyingLookup = getFlyingTypeLookup()
@@ -87,7 +87,7 @@ local function buildFavoritePool(summonKind)
     for _, mountID in ipairs(mountIDs) do
         local name, _, _, _, isUsable, _, isFavorite, _, _, shouldHideOnChar, isCollected =
             C_MountJournal.GetMountInfoByID(mountID)
-        if name and isCollected and isUsable and isFavorite and not shouldHideOnChar then
+        if name and isCollected and (ignoreUsable or isUsable) and isFavorite and not shouldHideOnChar then
             local _, _, _, _, mountTypeID = C_MountJournal.GetMountInfoExtraByID(mountID)
             local isFlyingMountType = type(mountTypeID) == "number" and flyingLookup[mountTypeID]
             local include
@@ -104,24 +104,6 @@ local function buildFavoritePool(summonKind)
         end
     end
 
-    return pool
-end
-
-local function buildCycleTrackedFavoritePool(summonKind)
-    local pool = buildFavoritePool(summonKind)
-    if not IsMounted() then
-        return pool
-    end
-
-    local activeMountID = getActiveMountID()
-    if not activeMountID or not isFavoriteInPoolIgnoringUsable(summonKind, activeMountID) then
-        return pool
-    end
-
-    local poolLookup = ns.poolToLookup(pool)
-    if not poolLookup[activeMountID] then
-        pool[#pool + 1] = activeMountID
-    end
     return pool
 end
 
@@ -196,10 +178,15 @@ local function announceCycleReset(reason, poolKeys)
     ns.warnResetAnnouncement(warningText)
     ns.printResetAnnouncementMessage(warningText .. ".")
 
+    local parts = {}
     for i = 1, #poolKeys do
         local poolKey = poolKeys[i]
-        ns.printResetAnnouncementMessage(
-            string.format("%s list: %s", poolKey, ns.formatMountList(db.remainingMountIDs[poolKey]))
+        local n = #(db.remainingMountIDs[poolKey] or {})
+        parts[#parts + 1] = string.format("%s: %d", poolKey, n)
+    end
+    if #parts > 0 then
+        ns.printCycleRemainingMessage(
+            "No-repeat cycle — " .. table.concat(parts, ", ") .. " left until refill."
         )
     end
 end
@@ -208,7 +195,7 @@ local function removeMountFromAllCycleQueues(mountID)
     local db = ns.db
     for _, poolKey in ipairs(POOL_KEYS) do
         if isFavoriteInPoolIgnoringUsable(poolKey, mountID) then
-            local pool = buildCycleTrackedFavoritePool(poolKey)
+            local pool = buildFavoritePool(poolKey, true)
             if #pool > 0 then
                 rebuildCycleIfNeeded(pool, poolKey)
             end
@@ -341,7 +328,7 @@ function ns.refreshAvailableMounts(showChatFeedback)
     local summaryParts = {}
     local anyChanges = false
     for _, poolKey in ipairs(POOL_KEYS) do
-        local pool         = buildCycleTrackedFavoritePool(poolKey)
+        local pool         = buildFavoritePool(poolKey, true)
         local poolLookup   = ns.poolToLookup(pool)
         local prevCycle    = db.cycleMountIDs[poolKey] or {}
         local prevRemain   = db.remainingMountIDs[poolKey] or {}
@@ -403,8 +390,8 @@ end
 
 function ns.summonNextFavoriteMount()
     local summonKind = resolveSummonKind()
-    local pool = buildFavoritePool(summonKind)
-    if #pool == 0 then
+    local usablePool = buildFavoritePool(summonKind)
+    if #usablePool == 0 then
         if summonKind == "flying" then
             ns.printMessage("No usable favorite flying mounts match your filters.", true)
         elseif summonKind == "ground" then
@@ -416,15 +403,25 @@ function ns.summonNextFavoriteMount()
     end
 
     if ns.db.options.cycleWithoutRepeats then
-        local remaining = ensureRemainingPoolReady(summonKind, pool)
-        if #remaining == 0 then
+        local fullPool = buildFavoritePool(summonKind, true)
+        local remaining = ensureRemainingPoolReady(summonKind, fullPool)
+
+        local usableLookup = ns.poolToLookup(usablePool)
+        local usableRemaining = {}
+        for i = 1, #remaining do
+            if usableLookup[remaining[i]] then
+                usableRemaining[#usableRemaining + 1] = remaining[i]
+            end
+        end
+
+        if #usableRemaining == 0 then
             ns.printMessage("No usable favorite mounts are queued for that pool right now.", true)
             return
         end
-        local mountID = remaining[math.random(#remaining)]
+        local mountID = usableRemaining[math.random(#usableRemaining)]
         C_MountJournal.SummonByID(mountID)
     else
-        C_MountJournal.SummonByID(pool[math.random(#pool)])
+        C_MountJournal.SummonByID(usablePool[math.random(#usablePool)])
     end
 end
 
@@ -438,7 +435,7 @@ function ns.resetCycle(reason)
     db.cycleMountIDs     = ns.newEmptyRemainingPools()
 
     for _, poolKey in ipairs(POOL_KEYS) do
-        setFreshCyclePool(poolKey, buildCycleTrackedFavoritePool(poolKey))
+        setFreshCyclePool(poolKey, buildFavoritePool(poolKey, true))
     end
 
     announceCycleReset(reason or "reset command used", POOL_KEYS)
