@@ -43,7 +43,7 @@ local DEFAULT_OPTIONS = {
     includeSkyriding = true,
     cycleWithoutRepeats = true,
     showCycleRemainingChat = true,
-    resetCycleOnLogin = false,
+    showResetAnnouncements = true,
     showChatMessages = true,
 }
 
@@ -114,6 +114,21 @@ local function printCycleRemainingMessage(text)
         return
     end
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99FlyingMountCycler:|r " .. text)
+end
+
+--- Dedicated reset notice channel: separate from general chat spam toggles.
+local function printResetAnnouncementMessage(text)
+    if not db or not db.options or db.options.showResetAnnouncements ~= true then
+        return
+    end
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99FlyingMountCycler:|r " .. text)
+end
+
+local function warnResetAnnouncement(text)
+    if not db or not db.options or db.options.showResetAnnouncements ~= true then
+        return
+    end
+    UIErrorsFrame:AddMessage(text, 1.0, 0.82, 0.0)
 end
 
 --------------------------------------------------------------------------------
@@ -194,10 +209,77 @@ local function appendArray(target, values)
     end
 end
 
+local function getMountDisplayName(mountID)
+    local name = C_MountJournal.GetMountInfoByID(mountID)
+    return name or ("Mount #" .. tostring(mountID))
+end
+
+local function formatMountList(mountIDs)
+    if not mountIDs or #mountIDs == 0 then
+        return "none"
+    end
+
+    local parts = {}
+    for i = 1, #mountIDs do
+        parts[i] = getMountDisplayName(mountIDs[i])
+    end
+    return table.concat(parts, ", ")
+end
+
+local function setFreshCyclePool(poolKey, pool)
+    db.cycleMountIDs[poolKey] = copyArray(pool)
+    db.remainingMountIDs[poolKey] = copyArray(pool)
+end
+
 -- Forward declarations used by cycle-sync helpers.
 local getActiveMountID
 local isFavoriteInPoolIgnoringUsable
 local rebuildCycleIfNeeded
+
+local function ensureRemainingPoolReady(poolKey, pool)
+    rebuildCycleIfNeeded(pool, poolKey)
+
+    local remaining = db.remainingMountIDs[poolKey] or {}
+    if #remaining > 0 then
+        return remaining
+    end
+
+    local trackedCycle = db.cycleMountIDs[poolKey] or {}
+    if #trackedCycle == 0 then
+        trackedCycle = copyArray(pool)
+        db.cycleMountIDs[poolKey] = trackedCycle
+    end
+
+    if #trackedCycle == 0 then
+        return remaining
+    end
+
+    -- Recover from stale/older saved state that left a pool empty before summon time.
+    setFreshCyclePool(poolKey, trackedCycle)
+    return db.remainingMountIDs[poolKey]
+end
+
+local function announceCycleReset(reason, poolKeys)
+    if not db or not db.options or db.options.showResetAnnouncements ~= true then
+        return
+    end
+
+    local isSinglePool = #poolKeys == 1
+    local warningText
+    if isSinglePool then
+        warningText = string.format("%s cycle reset: %s", poolKeys[1], reason)
+    else
+        warningText = "Cycle reset: " .. reason
+    end
+
+    warnResetAnnouncement(warningText)
+    printResetAnnouncementMessage(warningText .. ".")
+
+    for i = 1, #poolKeys do
+        local poolKey = poolKeys[i]
+        printResetAnnouncementMessage(string.format("%s list: %s", poolKey, formatMountList(db.remainingMountIDs[poolKey])))
+    end
+end
 
 --- summonKind: "flying" | "ground" | "any"
 local function buildFavoritePool(summonKind)
@@ -313,6 +395,10 @@ local function removeMountFromAllCycleQueues(mountID)
                 rebuildCycleIfNeeded(pool, poolKey)
             end
             removeMountFromPoolRemainingIfPresent(poolKey, mountID)
+            if #(db.remainingMountIDs[poolKey] or {}) == 0 then
+                setFreshCyclePool(poolKey, db.cycleMountIDs[poolKey] or {})
+                announceCycleReset("reached the end of the list", { poolKey })
+            end
         end
     end
 end
@@ -418,9 +504,6 @@ rebuildCycleIfNeeded = function(pool, poolKey)
     appendArray(remaining, newMounts)
     db.remainingMountIDs[poolKey] = remaining
 
-    if #db.remainingMountIDs[poolKey] == 0 then
-        db.remainingMountIDs[poolKey] = copyArray(trackedCycle)
-    end
 end
 
 local function refreshAvailableMounts(showChatFeedback)
@@ -501,8 +584,11 @@ local function summonNextFavoriteMount()
     end
 
     if db.options.cycleWithoutRepeats then
-        rebuildCycleIfNeeded(pool, poolKey)
-        local remaining = db.remainingMountIDs[poolKey]
+        local remaining = ensureRemainingPoolReady(poolKey, pool)
+        if #remaining == 0 then
+            printMessage("No usable favorite mounts are queued for that pool right now.", true)
+            return
+        end
         local pickIndex = math.random(#remaining)
         local mountID = remaining[pickIndex]
         -- Removal from cycle queues happens on mount-state events so failed summons do not corrupt the list.
@@ -543,10 +629,15 @@ end
 -- Slash & cycle reset
 --------------------------------------------------------------------------------
 
-local function resetCycle()
+local function resetCycle(reason)
     db.remainingMountIDs = newEmptyRemainingPools()
     db.cycleMountIDs = newEmptyRemainingPools()
-    printMessage("Cycle reset. Your next summon starts a fresh round.")
+
+    for _, poolKey in ipairs(POOL_KEYS) do
+        setFreshCyclePool(poolKey, buildCycleTrackedFavoritePool(poolKey))
+    end
+
+    announceCycleReset(reason or "reset command used", POOL_KEYS)
 end
 
 local function forceRefreshMounts()
@@ -659,10 +750,10 @@ local function registerSettings()
     registerCheckboxSetting(
         category,
         opts,
-        "FMC_ResetCycleOnLogin",
-        "resetCycleOnLogin",
-        "Reset cycle on login",
-        "When enabled, repeat-tracking is cleared each time you log in on this character."
+        "FMC_ShowResetAnnouncements",
+        "showResetAnnouncements",
+        "Announce cycle resets",
+        "When enabled, resetting the cycle manually or reaching the end of a no-repeat list prints the reset reason and the rebuilt mount list to chat, and also shows a warning on screen."
     )
 
     registerCheckboxSetting(
@@ -670,34 +761,42 @@ local function registerSettings()
         opts,
         "FMC_ShowChatMessages",
         "showChatMessages",
-        "Chat messages (load / reset)",
-        "Show optional chat feedback when the addon loads or when you reset the cycle. No-repeat “mounts left” lines use the separate option under Cycle without repeats. Errors (e.g. empty pool) still print."
+        "Chat messages (load / refresh)",
+        "Show optional chat feedback when the addon loads or when you refresh mounts. Reset announcements and no-repeat “mounts left” lines use their own separate options. Errors (e.g. empty pool) still print."
     )
 
     Settings.RegisterAddOnCategory(category)
     settingsCategory = category
 
     local refreshFrame = CreateFrame("Frame")
-    refreshFrame.name = "Refresh Mounts"
+    refreshFrame.name = "Cycle Tools"
 
     local title = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
     title:SetPoint("TOPLEFT", 16, -16)
-    title:SetText("Refresh Mount Queue")
+    title:SetText("Cycle Tools")
 
     local description = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
     description:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -12)
     description:SetWidth(520)
     description:SetJustifyH("LEFT")
     description:SetJustifyV("TOP")
-    description:SetText("Re-scan your currently available favorite mounts and add any newly eligible ones to the active no-repeat cycle without resetting the mounts you still have queued.")
+    description:SetText("Refresh keeps your current progress and only updates the available mounts in the active cycle. Reset starts a fresh round immediately and rebuilds the current flying, ground, and any-favorite lists.")
 
-    local button = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
-    button:SetPoint("TOPLEFT", description, "BOTTOMLEFT", 0, -16)
-    button:SetSize(190, 24)
-    button:SetText("Refresh Available Mounts")
-    button:SetScript("OnClick", forceRefreshMounts)
+    local refreshButton = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    refreshButton:SetPoint("TOPLEFT", description, "BOTTOMLEFT", 0, -16)
+    refreshButton:SetSize(190, 24)
+    refreshButton:SetText("Refresh Available Mounts")
+    refreshButton:SetScript("OnClick", forceRefreshMounts)
 
-    Settings.RegisterCanvasLayoutSubcategory(category, refreshFrame, "Refresh Mounts")
+    local resetButton = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    resetButton:SetPoint("LEFT", refreshButton, "RIGHT", 12, 0)
+    resetButton:SetSize(140, 24)
+    resetButton:SetText("Reset Cycle")
+    resetButton:SetScript("OnClick", function()
+        resetCycle("reset button used")
+    end)
+
+    Settings.RegisterCanvasLayoutSubcategory(category, refreshFrame, "Cycle Tools")
 end
 
 --------------------------------------------------------------------------------
@@ -710,7 +809,7 @@ SLASH_FLYINGMOUNTCYCLER3 = "/fmc"
 SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
     local command = strlower(strtrim(msg or ""))
     if command == "reset" then
-        resetCycle()
+        resetCycle("reset command used")
         return
     end
     if command == "refresh" then
@@ -751,14 +850,6 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1)
         return
     end
 
-    if event == "PLAYER_LOGIN" then
-        if db and db.options and db.options.resetCycleOnLogin then
-            db.remainingMountIDs = newEmptyRemainingPools()
-            db.cycleMountIDs = newEmptyRemainingPools()
-        end
-        return
-    end
-
     if event == "PLAYER_MOUNT_DISPLAY_CHANGED" then
         scheduleNoRepeatCycleUpdateFromMountState()
         return
@@ -775,7 +866,6 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1)
 end)
 
 eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:RegisterEvent("PLAYER_LOGIN")
 eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
 eventFrame:RegisterEvent("COMPANION_UPDATE")
 eventFrame:RegisterEvent("UNIT_AURA")
