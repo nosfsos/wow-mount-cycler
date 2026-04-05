@@ -1,8 +1,30 @@
 ## Interface: 120001, 120005, 120100
 ## Title: Flying Mount Cycler
-## Notes: Retail 12.0.1+. Cycles favorite mounts; options in Esc > Options > AddOns.
+## Notes: Cycles favorite mounts by pool (flying / ground / any) without repeats. Options in Esc > Options > AddOns.
 ## Author: Yuri + Cursor
-## Version: 1.1.0
+## Version: 1.2.0
+## Category: Mounts
+## IconTexture: Interface\Icons\Ability_Mount_Drake_Azure
+## DefaultState: enabled
+## AllowLoadGameType: mainline
+
 ## SavedVariables: FlyingMountCyclerDB
 
-FlyingMountCycler.lua
+## AddonCompartmentFunc: FlyingMountCycler_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: FlyingMountCycler_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: FlyingMountCycler_OnAddonCompartmentLeave
+
+# Namespace & constants
+Init.lua
+
+# Messaging & utility functions
+Utils.lua
+
+# Pool building, cycle management, summoning
+MountPool.lua
+
+# Settings UI & addon compartment
+Settings.lua
+
+# Event dispatch, slash commands, initialization
+Core.lua
