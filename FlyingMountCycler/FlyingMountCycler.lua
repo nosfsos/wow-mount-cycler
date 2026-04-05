@@ -1,8 +1,19 @@
 local addonName = ...
+
+-- API locals (slightly cheaper than global lookups each call).
+local C_MountJournal = C_MountJournal
+local IsFlyableArea = IsFlyableArea
+local IsMounted = IsMounted
+local UnitAffectingCombat = UnitAffectingCombat
+
 -- Display name for Esc → Options → AddOns (matches ## Title in .toc).
 local SETTINGS_TITLE = "Flying Mount Cycler"
 
-local FlyingMountCycler = CreateFrame("Frame")
+local eventFrame = CreateFrame("Frame")
+
+--------------------------------------------------------------------------------
+-- Constants
+--------------------------------------------------------------------------------
 
 --- Base flying mount type IDs (always treated as flying for pool split).
 local BASE_FLYING_MOUNT_TYPE_IDS = {
@@ -18,7 +29,7 @@ local SKYRIDING_MOUNT_TYPE_IDS = {
     [424] = true,
 }
 
---- Zone mode values (dropdown); aligned with MountUp-style behavior where useful.
+--- Zone mode (dropdown); aligned with MountUp-style behavior where useful.
 local ZONE_MODE = {
     AUTO = 1,
     FLYING_ONLY = 2,
@@ -34,8 +45,31 @@ local DEFAULT_OPTIONS = {
     showChatMessages = true,
 }
 
+local POOL_KEYS = { "flying", "ground", "any" }
+
+--------------------------------------------------------------------------------
+-- Saved state & UI
+--------------------------------------------------------------------------------
+
 local db
 local settingsCategory
+
+--- Cleared cycle queues (one list per summon pool).
+local function newEmptyRemainingPools()
+    return {
+        flying = {},
+        ground = {},
+        any = {},
+    }
+end
+
+--- Ensure SavedVariables have expected keys for repeat-tracking.
+local function ensureRemainingMountIDsShape(target)
+    target.remainingMountIDs = target.remainingMountIDs or newEmptyRemainingPools()
+    for _, key in ipairs(POOL_KEYS) do
+        target.remainingMountIDs[key] = target.remainingMountIDs[key] or {}
+    end
+end
 
 local function mergeDefaults(target)
     target.options = target.options or {}
@@ -47,6 +81,10 @@ local function mergeDefaults(target)
     end
 end
 
+--------------------------------------------------------------------------------
+-- Messaging
+--------------------------------------------------------------------------------
+
 local function printMessage(text, forceWhenQuiet)
     if not forceWhenQuiet and db and db.options and db.options.showChatMessages == false then
         return
@@ -54,18 +92,35 @@ local function printMessage(text, forceWhenQuiet)
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99FlyingMountCycler:|r " .. text)
 end
 
+--------------------------------------------------------------------------------
+-- Flying-type lookup (cached; rebuild only when skyriding option changes)
+--------------------------------------------------------------------------------
+
+local flyingLookupCache
+local flyingLookupCacheIncludeSkyriding
+
 local function getFlyingTypeLookup()
+    local includeSkyriding = db.options.includeSkyriding
+    if flyingLookupCache and flyingLookupCacheIncludeSkyriding == includeSkyriding then
+        return flyingLookupCache
+    end
+    flyingLookupCacheIncludeSkyriding = includeSkyriding
     local lookup = {}
     for id in pairs(BASE_FLYING_MOUNT_TYPE_IDS) do
         lookup[id] = true
     end
-    if db.options.includeSkyriding then
+    if includeSkyriding then
         for id in pairs(SKYRIDING_MOUNT_TYPE_IDS) do
             lookup[id] = true
         end
     end
+    flyingLookupCache = lookup
     return lookup
 end
+
+--------------------------------------------------------------------------------
+-- Pool building & “no repeat” cycle
+--------------------------------------------------------------------------------
 
 local function copyArray(source)
     local out = {}
@@ -73,6 +128,26 @@ local function copyArray(source)
         out[i] = source[i]
     end
     return out
+end
+
+--- Build set of mount IDs still valid for filtering the remaining queue.
+local function poolToLookup(pool)
+    local poolLookup = {}
+    for i = 1, #pool do
+        poolLookup[pool[i]] = true
+    end
+    return poolLookup
+end
+
+local function retainOnlyCurrentPool(remaining, poolLookup)
+    local filtered = {}
+    for i = 1, #remaining do
+        local mountID = remaining[i]
+        if poolLookup[mountID] then
+            filtered[#filtered + 1] = mountID
+        end
+    end
+    return filtered
 end
 
 --- summonKind: "flying" | "ground" | "any"
@@ -104,24 +179,14 @@ local function buildFavoritePool(summonKind)
     return pool
 end
 
-local function retainOnlyCurrentPool(remaining, poolLookup)
-    local filtered = {}
-    for _, mountID in ipairs(remaining) do
-        if poolLookup[mountID] then
-            filtered[#filtered + 1] = mountID
-        end
-    end
-    return filtered
-end
-
+--- When favorites/usability change, drop stale IDs; refill queue when empty.
 local function rebuildCycleIfNeeded(pool, poolKey)
-    local poolLookup = {}
-    for _, mountID in ipairs(pool) do
-        poolLookup[mountID] = true
-    end
+    local poolLookup = poolToLookup(pool)
 
-    db.remainingMountIDs = db.remainingMountIDs or {}
-    db.remainingMountIDs[poolKey] = retainOnlyCurrentPool(db.remainingMountIDs[poolKey] or {}, poolLookup)
+    db.remainingMountIDs = db.remainingMountIDs or newEmptyRemainingPools()
+    local remaining = db.remainingMountIDs[poolKey] or {}
+    db.remainingMountIDs[poolKey] = retainOnlyCurrentPool(remaining, poolLookup)
+
     if #db.remainingMountIDs[poolKey] == 0 then
         db.remainingMountIDs[poolKey] = copyArray(pool)
     end
@@ -157,14 +222,21 @@ local function summonNextFavoriteMount()
     if db.options.cycleWithoutRepeats then
         rebuildCycleIfNeeded(pool, poolKey)
         local remaining = db.remainingMountIDs[poolKey]
-        local pickIndex = math.random(#remaining)
+        -- Random pick, O(1) removal: swap with tail then truncate (avoid table.remove shift cost).
+        local n = #remaining
+        local pickIndex = math.random(n)
         local mountID = remaining[pickIndex]
-        table.remove(remaining, pickIndex)
+        remaining[pickIndex] = remaining[n]
+        remaining[n] = nil
         C_MountJournal.SummonByID(mountID)
     else
         C_MountJournal.SummonByID(pool[math.random(#pool)])
     end
 end
+
+--------------------------------------------------------------------------------
+-- Combat / dismount
+--------------------------------------------------------------------------------
 
 local COMBAT_NO_MOUNT_MSG = "Cannot mount in combat."
 
@@ -173,7 +245,7 @@ local function warnCannotMountInCombat()
     UIErrorsFrame:AddMessage(COMBAT_NO_MOUNT_MSG, 1.0, 0.25, 0.25)
 end
 
---- Dismiss current mount (SummonByID toggles off when already active; works from user-initiated slash).
+--- Dismiss mount (SummonByID toggles off when already active; safe from slash).
 local function dismountIfMounted()
     if not IsMounted() then
         return
@@ -189,12 +261,12 @@ local function dismountIfMounted()
     pcall(Dismount)
 end
 
+--------------------------------------------------------------------------------
+-- Slash & cycle reset
+--------------------------------------------------------------------------------
+
 local function resetCycle()
-    db.remainingMountIDs = {
-        flying = {},
-        ground = {},
-        any = {},
-    }
+    db.remainingMountIDs = newEmptyRemainingPools()
     printMessage("Cycle reset. Your next summon starts a fresh round.")
 end
 
@@ -202,6 +274,24 @@ local function openAddonSettings()
     if settingsCategory then
         Settings.OpenToCategory(settingsCategory:GetID())
     end
+end
+
+--------------------------------------------------------------------------------
+-- Settings (Retail Settings API)
+--------------------------------------------------------------------------------
+
+local function registerCheckboxSetting(category, opts, addonVariable, optionKey, title, tooltip)
+    local defaultValue = DEFAULT_OPTIONS[optionKey]
+    local setting = Settings.RegisterAddOnSetting(
+        category,
+        addonVariable,
+        optionKey,
+        opts,
+        type(defaultValue),
+        title,
+        defaultValue
+    )
+    Settings.CreateCheckbox(category, setting, tooltip)
 end
 
 local function registerSettings()
@@ -239,83 +329,49 @@ local function registerSettings()
         Settings.CreateDropdown(category, setting, zoneModeOptions, tooltip)
     end
 
-    do
-        local variable = "FMC_IncludeSkyriding"
-        local variableKey = "includeSkyriding"
-        local defaultValue = DEFAULT_OPTIONS.includeSkyriding
-        local name = "Include skyriding mount types in the flying pool"
-        local tooltip =
-            "When enabled, dragonriding / skyriding families count as flying for pool selection. Turn off if you only want classic flying types in the flying pool."
-        local setting = Settings.RegisterAddOnSetting(
-            category,
-            variable,
-            variableKey,
-            opts,
-            type(defaultValue),
-            name,
-            defaultValue
-        )
-        Settings.CreateCheckbox(category, setting, tooltip)
-    end
+    registerCheckboxSetting(
+        category,
+        opts,
+        "FMC_IncludeSkyriding",
+        "includeSkyriding",
+        "Include skyriding mount types in the flying pool",
+        "When enabled, dragonriding / skyriding families count as flying for pool selection. Turn off if you only want classic flying types in the flying pool."
+    )
 
-    do
-        local variable = "FMC_CycleWithoutRepeats"
-        local variableKey = "cycleWithoutRepeats"
-        local defaultValue = DEFAULT_OPTIONS.cycleWithoutRepeats
-        local name = "Cycle without repeats"
-        local tooltip =
-            "When enabled, you will not see the same mount again until every mount in the current pool has been used (per pool: flying, ground, or any)."
-        local setting = Settings.RegisterAddOnSetting(
-            category,
-            variable,
-            variableKey,
-            opts,
-            type(defaultValue),
-            name,
-            defaultValue
-        )
-        Settings.CreateCheckbox(category, setting, tooltip)
-    end
+    registerCheckboxSetting(
+        category,
+        opts,
+        "FMC_CycleWithoutRepeats",
+        "cycleWithoutRepeats",
+        "Cycle without repeats",
+        "When enabled, you will not see the same mount again until every mount in the current pool has been used (per pool: flying, ground, or any)."
+    )
 
-    do
-        local variable = "FMC_ResetCycleOnLogin"
-        local variableKey = "resetCycleOnLogin"
-        local defaultValue = DEFAULT_OPTIONS.resetCycleOnLogin
-        local name = "Reset cycle on login"
-        local tooltip = "When enabled, repeat-tracking is cleared each time you log in on this character."
-        local setting = Settings.RegisterAddOnSetting(
-            category,
-            variable,
-            variableKey,
-            opts,
-            type(defaultValue),
-            name,
-            defaultValue
-        )
-        Settings.CreateCheckbox(category, setting, tooltip)
-    end
+    registerCheckboxSetting(
+        category,
+        opts,
+        "FMC_ResetCycleOnLogin",
+        "resetCycleOnLogin",
+        "Reset cycle on login",
+        "When enabled, repeat-tracking is cleared each time you log in on this character."
+    )
 
-    do
-        local variable = "FMC_ShowChatMessages"
-        local variableKey = "showChatMessages"
-        local defaultValue = DEFAULT_OPTIONS.showChatMessages
-        local name = "Chat messages (load / reset)"
-        local tooltip = "Show optional chat feedback when the addon loads or when you reset the cycle. Errors (e.g. empty pool) still print."
-        local setting = Settings.RegisterAddOnSetting(
-            category,
-            variable,
-            variableKey,
-            opts,
-            type(defaultValue),
-            name,
-            defaultValue
-        )
-        Settings.CreateCheckbox(category, setting, tooltip)
-    end
+    registerCheckboxSetting(
+        category,
+        opts,
+        "FMC_ShowChatMessages",
+        "showChatMessages",
+        "Chat messages (load / reset)",
+        "Show optional chat feedback when the addon loads or when you reset the cycle. Errors (e.g. empty pool) still print."
+    )
 
     Settings.RegisterAddOnCategory(category)
     settingsCategory = category
 end
+
+--------------------------------------------------------------------------------
+-- Slash commands
+--------------------------------------------------------------------------------
 
 SLASH_FLYINGMOUNTCYCLER1 = "/fmount"
 SLASH_FLYINGMOUNTCYCLER2 = "/flyingmount"
@@ -343,14 +399,15 @@ SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
     summonNextFavoriteMount()
 end
 
-FlyingMountCycler:SetScript("OnEvent", function(_, event, loadedAddonName, ...)
+--------------------------------------------------------------------------------
+-- Lifecycle
+--------------------------------------------------------------------------------
+
+eventFrame:SetScript("OnEvent", function(_, event, loadedAddonName)
     if event == "ADDON_LOADED" and loadedAddonName == addonName then
         FlyingMountCyclerDB = FlyingMountCyclerDB or {}
-        FlyingMountCyclerDB.remainingMountIDs = FlyingMountCyclerDB.remainingMountIDs or {}
-        FlyingMountCyclerDB.remainingMountIDs.flying = FlyingMountCyclerDB.remainingMountIDs.flying or {}
-        FlyingMountCyclerDB.remainingMountIDs.ground = FlyingMountCyclerDB.remainingMountIDs.ground or {}
-        FlyingMountCyclerDB.remainingMountIDs.any = FlyingMountCyclerDB.remainingMountIDs.any or {}
         db = FlyingMountCyclerDB
+        ensureRemainingMountIDsShape(db)
         mergeDefaults(db)
         registerSettings()
         printMessage("Loaded. |cffaaaaaa/fmount|r — next mount, |cffaaaaaa/fmount reset|r — reset cycle, |cffaaaaaa/fmount config|r — options.|r")
@@ -359,14 +416,10 @@ FlyingMountCycler:SetScript("OnEvent", function(_, event, loadedAddonName, ...)
 
     if event == "PLAYER_LOGIN" then
         if db and db.options and db.options.resetCycleOnLogin then
-            db.remainingMountIDs = {
-                flying = {},
-                ground = {},
-                any = {},
-            }
+            db.remainingMountIDs = newEmptyRemainingPools()
         end
     end
 end)
 
-FlyingMountCycler:RegisterEvent("ADDON_LOADED")
-FlyingMountCycler:RegisterEvent("PLAYER_LOGIN")
+eventFrame:RegisterEvent("ADDON_LOADED")
+eventFrame:RegisterEvent("PLAYER_LOGIN")
