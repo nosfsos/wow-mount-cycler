@@ -5,6 +5,7 @@ local C_MountJournal = C_MountJournal
 local IsFlyableArea = IsFlyableArea
 local IsMounted = IsMounted
 local UnitAffectingCombat = UnitAffectingCombat
+local TimerAfter = C_Timer and C_Timer.After
 
 -- Display name for Esc → Options → AddOns (matches ## Title in .toc).
 local SETTINGS_TITLE = "Flying Mount Cycler"
@@ -41,6 +42,7 @@ local DEFAULT_OPTIONS = {
     zoneMode = ZONE_MODE.AUTO,
     includeSkyriding = true,
     cycleWithoutRepeats = true,
+    showCycleRemainingChat = true,
     resetCycleOnLogin = false,
     showChatMessages = true,
 }
@@ -53,6 +55,11 @@ local POOL_KEYS = { "flying", "ground", "any" }
 
 local db
 local settingsCategory
+
+--- Coalesce rapid PLAYER_MOUNT_DISPLAY_CHANGED fires; only the latest deferred pass runs.
+local mountAnnounceDeferSeq = 0
+--- Skip duplicate processing while still on the same mount (extra display-changed events).
+local lastProcessedNoRepeatMountID
 
 --- Cleared cycle queues (one list per summon pool).
 local function newEmptyRemainingPools()
@@ -87,6 +94,14 @@ end
 
 local function printMessage(text, forceWhenQuiet)
     if not forceWhenQuiet and db and db.options and db.options.showChatMessages == false then
+        return
+    end
+    DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99FlyingMountCycler:|r " .. text)
+end
+
+--- No-repeat progress line (separate from general “chat messages” option).
+local function printCycleRemainingMessage(text)
+    if not db or not db.options or db.options.showCycleRemainingChat ~= true then
         return
     end
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99FlyingMountCycler:|r " .. text)
@@ -179,8 +194,154 @@ local function buildFavoritePool(summonKind)
     return pool
 end
 
+--- Resolve current mount ID robustly (journal API can briefly return 0 on mount change).
+local function getActiveMountID()
+    local getSummoned = C_MountJournal.GetSummonedMountID
+    if getSummoned then
+        local mountID = getSummoned()
+        if mountID and mountID > 0 then
+            return mountID
+        end
+    end
+
+    local mountIDs = C_MountJournal.GetMountIDs() or {}
+    for i = 1, #mountIDs do
+        local mountID = mountIDs[i]
+        local _, _, _, isActive = C_MountJournal.GetMountInfoByID(mountID)
+        if isActive then
+            return mountID
+        end
+    end
+    return nil
+end
+
+-- Forward declaration (used by mount-cycle sync helpers below).
+local rebuildCycleIfNeeded
+
+--- While mounted, the journal often reports isUsable = false; still match pool/type for cycle sync + chat.
+local function isFavoriteInPoolIgnoringUsable(poolKey, mountID)
+    local name, _, _, _, _, _, isFavorite, _, _, shouldHideOnChar, isCollected =
+        C_MountJournal.GetMountInfoByID(mountID)
+    if not (name and isCollected and isFavorite and not shouldHideOnChar) then
+        return false
+    end
+    local _, _, _, _, mountTypeID = C_MountJournal.GetMountInfoExtraByID(mountID)
+    local isFlyingMountType = type(mountTypeID) == "number" and getFlyingTypeLookup()[mountTypeID]
+    if poolKey == "any" then
+        return true
+    elseif poolKey == "flying" then
+        return isFlyingMountType
+    else
+        return not isFlyingMountType
+    end
+end
+
+--- Remove one occurrence of mountID from a pool’s remaining queue; true if something was removed.
+local function removeMountFromPoolRemainingIfPresent(poolKey, mountID)
+    local remaining = db.remainingMountIDs[poolKey]
+    if not remaining then
+        return false
+    end
+    for i = #remaining, 1, -1 do
+        if remaining[i] == mountID then
+            local n = #remaining
+            remaining[i] = remaining[n]
+            remaining[n] = nil
+            return true
+        end
+    end
+    return false
+end
+
+--- When the player rides a favorite, advance every cycle queue that contains that mount (journal + /fmount).
+local function removeMountFromAllCycleQueues(mountID)
+    for _, poolKey in ipairs(POOL_KEYS) do
+        if isFavoriteInPoolIgnoringUsable(poolKey, mountID) then
+            -- Keep no-repeat queues coherent even when mounting outside /fmount.
+            local pool = buildFavoritePool(poolKey)
+            if #pool > 0 then
+                rebuildCycleIfNeeded(pool, poolKey)
+            end
+            removeMountFromPoolRemainingIfPresent(poolKey, mountID)
+        end
+    end
+end
+
+local function announceNoRepeatCycleProgress(mountID)
+    local parts = {}
+    for _, poolKey in ipairs(POOL_KEYS) do
+        if isFavoriteInPoolIgnoringUsable(poolKey, mountID) then
+            local n = #(db.remainingMountIDs[poolKey] or {})
+            parts[#parts + 1] = string.format("%s: %d", poolKey, n)
+        end
+    end
+    if #parts == 0 then
+        return
+    end
+    printCycleRemainingMessage("No-repeat cycle — " .. table.concat(parts, ", ") .. " left until refill.")
+end
+
+local function mountQualifiesForNoRepeatSync(mountID)
+    for _, poolKey in ipairs(POOL_KEYS) do
+        if isFavoriteInPoolIgnoringUsable(poolKey, mountID) then
+            return true
+        end
+    end
+    return false
+end
+
+local function processMountedForNoRepeatCycle()
+    if not db or not db.options or not db.options.cycleWithoutRepeats then
+        return
+    end
+    if not IsMounted() then
+        return
+    end
+
+    local mountID = getActiveMountID()
+    if not mountID then
+        return
+    end
+    if not mountQualifiesForNoRepeatSync(mountID) then
+        return
+    end
+    if mountID == lastProcessedNoRepeatMountID then
+        return
+    end
+
+    lastProcessedNoRepeatMountID = mountID
+    removeMountFromAllCycleQueues(mountID)
+    announceNoRepeatCycleProgress(mountID)
+end
+
+local function scheduleNoRepeatCycleUpdateFromMountState()
+    if not IsMounted() then
+        lastProcessedNoRepeatMountID = nil
+        mountAnnounceDeferSeq = mountAnnounceDeferSeq + 1
+        return
+    end
+    if not db or not db.options or not db.options.cycleWithoutRepeats then
+        return
+    end
+
+    mountAnnounceDeferSeq = mountAnnounceDeferSeq + 1
+    local seq = mountAnnounceDeferSeq
+    local function runDeferred()
+        if seq ~= mountAnnounceDeferSeq then
+            return
+        end
+        processMountedForNoRepeatCycle()
+    end
+
+    if TimerAfter then
+        TimerAfter(0.05, runDeferred)
+    else
+        runDeferred()
+    end
+end
+
 --- When favorites/usability change, drop stale IDs; refill queue when empty.
-local function rebuildCycleIfNeeded(pool, poolKey)
+rebuildCycleIfNeeded = function(pool, poolKey)
     local poolLookup = poolToLookup(pool)
 
     db.remainingMountIDs = db.remainingMountIDs or newEmptyRemainingPools()
@@ -222,12 +383,9 @@ local function summonNextFavoriteMount()
     if db.options.cycleWithoutRepeats then
         rebuildCycleIfNeeded(pool, poolKey)
         local remaining = db.remainingMountIDs[poolKey]
-        -- Random pick, O(1) removal: swap with tail then truncate (avoid table.remove shift cost).
-        local n = #remaining
-        local pickIndex = math.random(n)
+        local pickIndex = math.random(#remaining)
         local mountID = remaining[pickIndex]
-        remaining[pickIndex] = remaining[n]
-        remaining[n] = nil
+        -- Removal from cycle queues happens on mount-state events so failed summons do not corrupt the list.
         C_MountJournal.SummonByID(mountID)
     else
         C_MountJournal.SummonByID(pool[math.random(#pool)])
@@ -338,14 +496,40 @@ local function registerSettings()
         "When enabled, dragonriding / skyriding families count as flying for pool selection. Turn off if you only want classic flying types in the flying pool."
     )
 
-    registerCheckboxSetting(
-        category,
-        opts,
-        "FMC_CycleWithoutRepeats",
-        "cycleWithoutRepeats",
-        "Cycle without repeats",
-        "When enabled, you will not see the same mount again until every mount in the current pool has been used (per pool: flying, ground, or any)."
-    )
+    do
+        local cycleSetting = Settings.RegisterAddOnSetting(
+            category,
+            "FMC_CycleWithoutRepeats",
+            "cycleWithoutRepeats",
+            opts,
+            type(DEFAULT_OPTIONS.cycleWithoutRepeats),
+            "Cycle without repeats",
+            DEFAULT_OPTIONS.cycleWithoutRepeats
+        )
+        local cycleInitializer = Settings.CreateCheckbox(
+            category,
+            cycleSetting,
+            "When enabled, you will not see the same mount again until every mount in the current pool has been used (per pool: flying, ground, or any)."
+        )
+        local remainingSetting = Settings.RegisterAddOnSetting(
+            category,
+            "FMC_ShowCycleRemainingChat",
+            "showCycleRemainingChat",
+            opts,
+            type(DEFAULT_OPTIONS.showCycleRemainingChat),
+            "Chat: mounts left until cycle refill",
+            DEFAULT_OPTIONS.showCycleRemainingChat
+        )
+        local remainingInitializer = Settings.CreateCheckbox(
+            category,
+            remainingSetting,
+            "After you mount, print how many favorites are still queued before the no-repeat pool refills. Only applies while Cycle without repeats is on; the checkbox is disabled otherwise."
+        )
+        remainingInitializer:SetParentInitializer(cycleInitializer, function()
+            return opts.cycleWithoutRepeats
+        end)
+        remainingInitializer:Indent()
+    end
 
     registerCheckboxSetting(
         category,
@@ -362,7 +546,7 @@ local function registerSettings()
         "FMC_ShowChatMessages",
         "showChatMessages",
         "Chat messages (load / reset)",
-        "Show optional chat feedback when the addon loads or when you reset the cycle. Errors (e.g. empty pool) still print."
+        "Show optional chat feedback when the addon loads or when you reset the cycle. No-repeat “mounts left” lines use the separate option under Cycle without repeats. Errors (e.g. empty pool) still print."
     )
 
     Settings.RegisterAddOnCategory(category)
@@ -418,8 +602,20 @@ eventFrame:SetScript("OnEvent", function(_, event, loadedAddonName)
         if db and db.options and db.options.resetCycleOnLogin then
             db.remainingMountIDs = newEmptyRemainingPools()
         end
+        return
+    end
+
+    if event == "PLAYER_MOUNT_DISPLAY_CHANGED" then
+        scheduleNoRepeatCycleUpdateFromMountState()
+        return
+    end
+
+    if event == "UNIT_AURA" and loadedAddonName == "player" then
+        scheduleNoRepeatCycleUpdateFromMountState()
     end
 end)
 
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
+eventFrame:RegisterEvent("PLAYER_MOUNT_DISPLAY_CHANGED")
+eventFrame:RegisterEvent("UNIT_AURA")
