@@ -1,5 +1,5 @@
 param(
-    [string]$AddOnsPath = "C:\Program Files (x86)\World of Warcraft\_retail_\Interface\AddOns"
+    [string]$AddOnsPath = "E:\Games\Battle.net\World of Warcraft\_retail_\Interface\AddOns"
 )
 
 $ErrorActionPreference = "Stop"
