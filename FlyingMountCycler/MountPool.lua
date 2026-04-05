@@ -5,9 +5,53 @@ local IsFlyableArea  = IsFlyableArea
 local IsMounted      = IsMounted
 local TimerAfter     = C_Timer and C_Timer.After
 
+local GetTime = GetTime
+
 local CycleState = ns.CycleState
 local ZONE_MODE = ns.ZONE_MODE
 local POOL_KEYS = ns.POOL_KEYS
+
+--------------------------------------------------------------------------------
+-- Mount lock (session-only): keep the same mount for a configurable duration
+--------------------------------------------------------------------------------
+
+local lockedMountID
+local lockedAtTime
+local lockedSummonKind
+
+local function isMountLockActive()
+    local db = ns.db
+    if not db or not db.options or not db.options.mountLockEnabled then
+        return false
+    end
+    if not lockedMountID or not lockedAtTime then
+        return false
+    end
+    local elapsed = GetTime() - lockedAtTime
+    local duration = (db.options.mountLockDuration or 15) * 60
+    return elapsed < duration
+end
+
+local function setMountLock(mountID, summonKind)
+    lockedMountID = mountID
+    lockedAtTime = GetTime()
+    lockedSummonKind = summonKind
+end
+
+function ns.clearMountLock()
+    lockedMountID = nil
+    lockedAtTime = nil
+    lockedSummonKind = nil
+end
+
+function ns.getMountLockTimeRemaining()
+    if not isMountLockActive() then
+        return 0
+    end
+    local elapsed = GetTime() - lockedAtTime
+    local duration = (ns.db.options.mountLockDuration or 15) * 60
+    return math.max(0, duration - elapsed)
+end
 
 --------------------------------------------------------------------------------
 -- Flying-type lookup (cached; rebuilt when skyriding pref changes)
@@ -309,6 +353,20 @@ function ns.summonNextFavoriteMount()
         return
     end
 
+    if isMountLockActive() and lockedSummonKind == summonKind then
+        local usableLookup = ns.poolToLookup(usablePool)
+        if usableLookup[lockedMountID] then
+            local remaining = math.ceil(ns.getMountLockTimeRemaining() / 60)
+            ns.printCycleRemainingMessage(
+                "Mount locked: " .. ns.getMountDisplayName(lockedMountID)
+                .. " (" .. remaining .. " min remaining)."
+            )
+            C_MountJournal.SummonByID(lockedMountID)
+            return
+        end
+    end
+
+    local chosenMountID
     if ns.db.options.cycleWithoutRepeats then
         local fullPool = buildFavoritePool(summonKind, true)
         local remaining = ensureRemainingPoolReady(summonKind, fullPool)
@@ -326,11 +384,21 @@ function ns.summonNextFavoriteMount()
                 return
             end
         end
-        local mountID = usableRemaining[math.random(#usableRemaining)]
-        C_MountJournal.SummonByID(mountID)
+        chosenMountID = usableRemaining[math.random(#usableRemaining)]
     else
-        C_MountJournal.SummonByID(usablePool[math.random(#usablePool)])
+        chosenMountID = usablePool[math.random(#usablePool)]
     end
+
+    if ns.db.options.mountLockEnabled then
+        setMountLock(chosenMountID, summonKind)
+        local duration = ns.db.options.mountLockDuration or 15
+        ns.printCycleRemainingMessage(
+            "Mount locked: " .. ns.getMountDisplayName(chosenMountID)
+            .. " for " .. duration .. " min."
+        )
+    end
+
+    C_MountJournal.SummonByID(chosenMountID)
 end
 
 --------------------------------------------------------------------------------
@@ -346,6 +414,7 @@ function ns.resetCycle(reason)
         setFreshCyclePool(poolKey, buildFavoritePool(poolKey, true))
     end
 
+    ns.clearMountLock()
     announceCycleReset(reason or "reset command used", POOL_KEYS)
 end
 

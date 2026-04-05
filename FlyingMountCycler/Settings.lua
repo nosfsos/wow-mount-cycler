@@ -84,6 +84,46 @@ function ns.registerSettings()
         remainInit:Indent()
     end
 
+    -- "Lock mount for duration" with nested duration dropdown
+    do
+        local lockSetting = Settings.RegisterAddOnSetting(
+            category, "FMC_MountLockEnabled", "mountLockEnabled", opts,
+            type(DEFAULT_OPTIONS.mountLockEnabled), "Lock mount for a duration",
+            DEFAULT_OPTIONS.mountLockEnabled
+        )
+        local lockInit = Settings.CreateCheckbox(
+            category, lockSetting,
+            "When enabled, the same mount is summoned repeatedly until the timer expires, then cycles to the next."
+        )
+
+        local function lockDurationOptions()
+            local container = Settings.CreateControlTextContainer()
+            for _, minutes in ipairs(ns.MOUNT_LOCK_DURATIONS) do
+                if minutes < 60 then
+                    container:Add(minutes, minutes .. " minutes")
+                elseif minutes == 60 then
+                    container:Add(minutes, "1 hour")
+                else
+                    container:Add(minutes, (minutes / 60) .. " hours")
+                end
+            end
+            return container:GetData()
+        end
+        local durationSetting = Settings.RegisterAddOnSetting(
+            category, "FMC_MountLockDuration", "mountLockDuration", opts,
+            type(DEFAULT_OPTIONS.mountLockDuration), "Lock duration",
+            DEFAULT_OPTIONS.mountLockDuration
+        )
+        local durationInit = Settings.CreateDropdown(
+            category, durationSetting, lockDurationOptions,
+            "How long to keep the same mount before cycling to the next one."
+        )
+        durationInit:SetParentInitializer(lockInit, function()
+            return opts.mountLockEnabled
+        end)
+        durationInit:Indent()
+    end
+
     registerCheckbox(
         category, opts,
         "FMC_ShowResetAnnouncements", "showResetAnnouncements",

@@ -56,6 +56,7 @@ local eventHandlers = {
             "Loaded. |cffaaaaaa/fmount|r — next mount, "
             .. "|cffaaaaaa/fmount reset|r — reset cycle, "
             .. "|cffaaaaaa/fmount refresh|r — refresh mounts, "
+            .. "|cffaaaaaa/fmount unlock|r — clear mount lock, "
             .. "|cffaaaaaa/fmount config|r — options."
         )
 
@@ -107,6 +108,11 @@ SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
     end
     if command == "refresh" then
         ns.refreshAvailableMounts(true)
+        return
+    end
+    if command == "unlock" then
+        ns.clearMountLock()
+        ns.printMessage("Mount lock cleared. Next summon will pick a new mount.", true)
         return
     end
     if command == "config" or command == "options" then

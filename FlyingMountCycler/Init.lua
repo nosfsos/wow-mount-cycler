@@ -24,6 +24,8 @@ ns.ZONE_MODE = {
     ANY_FAVORITE = 4,
 }
 
+ns.MOUNT_LOCK_DURATIONS = { 5, 15, 30, 60, 120 }
+
 ns.DEFAULT_OPTIONS = {
     zoneMode              = ns.ZONE_MODE.AUTO,
     includeSkyriding      = true,
@@ -31,6 +33,8 @@ ns.DEFAULT_OPTIONS = {
     showCycleRemainingChat = true,
     showResetAnnouncements = true,
     showChatMessages      = true,
+    mountLockEnabled      = false,
+    mountLockDuration     = 15,
 }
 
 ns.POOL_KEYS = { "flying", "ground", "any" }
