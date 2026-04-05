@@ -20,6 +20,9 @@ Init.lua
 # Messaging & utility functions
 Utils.lua
 
+# Pure cycle state transitions
+CycleState.lua
+
 # Pool building, cycle management, summoning
 MountPool.lua
 

@@ -66,10 +66,8 @@ local eventHandlers = {
         ns.scheduleNoRepeatCycleUpdateFromMountState()
     end,
 
-    COMPANION_UPDATE = function(_, companionType)
-        if companionType == "MOUNT" then
-            ns.refreshAvailableMounts(false)
-        end
+    NEW_MOUNT_ADDED = function()
+        ns.refreshAvailableMounts(false)
     end,
 
     UNIT_AURA = function()

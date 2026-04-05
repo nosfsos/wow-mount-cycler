@@ -12,6 +12,7 @@ ns.BASE_FLYING_MOUNT_TYPE_IDS = {
 
 ns.SKYRIDING_MOUNT_TYPE_IDS = {
     [398] = true,
+    [402] = true,
     [407] = true,
     [424] = true,
 }

@@ -1,0 +1,34 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / swap files
+*~
+*.swp
+*.swo
+\#*#
+
+# Lua bytecode
+*.luac
+
+# Luacheck (local cache)
+.luacheckcache
+
+# Manual / CI release bundles
+*.zip
+*.7z
+
+# Common packager output dirs (CurseForge/GitHub Actions, etc.)
+.releases/
+pkg/
+
+# Logs
+*.log
+
+# Python (e.g. addon-adjacent test tooling)
+__pycache__/
+*.py[cod]
+
+# Local test runner convenience script
+scripts/run-tests.ps1
