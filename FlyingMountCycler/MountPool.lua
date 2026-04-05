@@ -317,8 +317,14 @@ function ns.summonNextFavoriteMount()
         local usableRemaining = CycleState.filterUsableMounts(remaining, usableLookup)
 
         if #usableRemaining == 0 then
-            ns.printMessage("No usable favorite mounts are queued for that pool right now.", true)
-            return
+            setFreshCyclePool(summonKind, fullPool)
+            announceCycleReset("reached the end of the list", { summonKind })
+            remaining = ns.db.remainingMountIDs[summonKind] or {}
+            usableRemaining = CycleState.filterUsableMounts(remaining, usableLookup)
+            if #usableRemaining == 0 then
+                ns.printMessage("No usable favorite mounts are queued for that pool right now.", true)
+                return
+            end
         end
         local mountID = usableRemaining[math.random(#usableRemaining)]
         C_MountJournal.SummonByID(mountID)
