@@ -59,6 +59,7 @@ local eventHandlers = {
 
         ns.printMessage(
             "Loaded. |cffaaaaaa/fmount|r — next mount, "
+            .. "|cffaaaaaa/fmount skip|r — force next mount, "
             .. "|cffaaaaaa/fmount reset|r — reset cycle, "
             .. "|cffaaaaaa/fmount reset flying|r — reset one pool, "
             .. "|cffaaaaaa/fmount refresh|r — refresh mounts, "
@@ -160,6 +161,14 @@ SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
     end
     if command == "config" or command == "options" then
         ns.openAddonSettings()
+        return
+    end
+    if command == "skip" or command == "next" then
+        if UnitAffectingCombat("player") then
+            ns.warnCannotMountInCombat()
+            return
+        end
+        ns.skipToNextFavoriteMount()
         return
     end
 

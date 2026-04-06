@@ -241,6 +241,40 @@ class MountPoolRuntimeTests(unittest.TestCase):
             chat_messages,
         )
 
+    def test_skip_to_next_mount_bypasses_active_lock_once(self):
+        set_mounts(
+            self.lua,
+            [
+                {"id": 701, "name": "Green Drake", "mount_type_id": 242},
+                {"id": 702, "name": "Violet Proto-Drake", "mount_type_id": 242},
+            ],
+        )
+        self.lua.globals()["__flyable_area"] = True
+        self.lua.globals()["__active_mount_id"] = 701
+        self.ns.db["options"]["mountLockEnabled"] = True
+
+        self.ns.summonNextFavoriteMount()
+        self.ns.skipToNextFavoriteMount()
+
+        self.assertEqual(lua_array_to_list(self.lua.globals()["__summon_calls"]), [701, 702])
+
+    def test_lock_status_uses_minutes_above_sixty_seconds(self):
+        set_mounts(
+            self.lua,
+            [
+                {"id": 801, "name": "Time-Lost Proto-Drake", "mount_type_id": 242},
+            ],
+        )
+        self.lua.globals()["__flyable_area"] = True
+        self.ns.db["options"]["mountLockEnabled"] = True
+        self.ns.db["options"]["mountLockDuration"] = 2
+
+        self.ns.summonNextFavoriteMount()
+        self.lua.globals()["__time_now"] = 30
+
+        lines = lua_array_to_list(self.ns.getStatusReportLines())
+        self.assertTrue(any("min remaining" in line for line in lines), lines)
+
 
 if __name__ == "__main__":
     unittest.main()

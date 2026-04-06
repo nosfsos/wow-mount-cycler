@@ -64,6 +64,14 @@ function ns.getMountLockTimeRemaining()
     return math.max(0, duration - elapsed)
 end
 
+local function formatLockRemaining(secondsRemaining)
+    local roundedSeconds = math.ceil(secondsRemaining or 0)
+    if roundedSeconds > 60 then
+        return math.ceil(roundedSeconds / 60) .. " min remaining"
+    end
+    return roundedSeconds .. " sec remaining"
+end
+
 local function clearPendingSummon()
     pendingMountID = nil
     pendingSummonKind = nil
@@ -530,9 +538,9 @@ function ns.getStatusReportLines()
 
     if isMountLockActive() then
         lines[#lines + 1] = string.format(
-            "Mount lock: %s (%d sec remaining, %s pool)",
+            "Mount lock: %s (%s, %s pool)",
             ns.getMountDisplayName(lockedMountID),
-            math.ceil(ns.getMountLockTimeRemaining()),
+            formatLockRemaining(ns.getMountLockTimeRemaining()),
             formatPoolLabel(lockedSummonKind)
         )
     elseif options.mountLockEnabled then
@@ -597,9 +605,30 @@ function ns.resetCyclePool(poolKey, reason)
     return true
 end
 
-function ns.summonNextFavoriteMount()
+local function filterOutMountID(source, mountID)
+    if not mountID then
+        return source
+    end
+    local filtered = {}
+    for i = 1, #source do
+        local candidate = source[i]
+        if candidate ~= mountID then
+            filtered[#filtered + 1] = candidate
+        end
+    end
+    return filtered
+end
+
+local function summonNextFavoriteMountInternal(forceSkip)
     local summonKind = resolveSummonKind()
+    local activeMountID = getActiveMountID()
     local usablePool = buildFavoritePool(summonKind)
+    if forceSkip and activeMountID then
+        local withoutActive = filterOutMountID(usablePool, activeMountID)
+        if #withoutActive > 0 then
+            usablePool = withoutActive
+        end
+    end
     debugSelectionMessage(
         string.format(
             "Resolved %s pool with %d usable favorites.",
@@ -618,6 +647,14 @@ function ns.summonNextFavoriteMount()
         return
     end
 
+    if forceSkip and isMountLockActive() then
+        ns.clearMountLock()
+    end
+
+    if forceSkip and hasPendingSummon() then
+        clearPendingSummon()
+    end
+
     if isMountLockActive() and lockedSummonKind ~= summonKind then
         ns.clearMountLock()
         ns.printMessage(
@@ -626,17 +663,16 @@ function ns.summonNextFavoriteMount()
         )
     end
 
-    if isMountLockActive() and lockedSummonKind == summonKind then
+    if not forceSkip and isMountLockActive() and lockedSummonKind == summonKind then
         local usableLookup = ns.poolToLookup(usablePool)
         if usableLookup[lockedMountID] then
             local now = GetTime()
             if lastLockMessageMountID ~= lockedMountID
                 or not lastLockMessageAt
                 or (now - lastLockMessageAt) >= LOCK_MESSAGE_THROTTLE_SECONDS then
-                local secondsRemaining = math.ceil(ns.getMountLockTimeRemaining())
                 ns.printCycleRemainingMessage(
                     "Mount locked: " .. ns.getMountDisplayName(lockedMountID)
-                    .. " (" .. secondsRemaining .. " sec remaining)."
+                    .. " (" .. formatLockRemaining(ns.getMountLockTimeRemaining()) .. ")."
                 )
                 lastLockMessageMountID = lockedMountID
                 lastLockMessageAt = now
@@ -650,7 +686,7 @@ function ns.summonNextFavoriteMount()
         ns.printMessage("Mount lock cleared because the locked mount is no longer usable in that pool.", true)
     end
 
-    if hasPendingSummon() and pendingSummonKind == summonKind then
+    if not forceSkip and hasPendingSummon() and pendingSummonKind == summonKind then
         local usableLookup = ns.poolToLookup(usablePool)
         if usableLookup[pendingMountID] then
             debugSelectionMessage(
@@ -671,8 +707,19 @@ function ns.summonNextFavoriteMount()
         local usableLookup = ns.poolToLookup(usablePool)
         local usableRemainingBase = CycleState.filterUsableMounts(remaining, usableLookup)
         local usableRemaining = filterOutPendingMount(usableRemainingBase)
+        if forceSkip and activeMountID then
+            local filteredBase = filterOutMountID(usableRemainingBase, activeMountID)
+            local filtered = filterOutMountID(usableRemaining, activeMountID)
+            if #filteredBase > 0 then
+                usableRemainingBase = filteredBase
+            end
+            if #filtered > 0 then
+                usableRemaining = filtered
+            end
+        end
 
-        if #usableRemaining == 0 and #usableRemainingBase > 0 and hasPendingSummon() and pendingSummonKind == summonKind then
+        if (not forceSkip) and #usableRemaining == 0 and #usableRemainingBase > 0
+            and hasPendingSummon() and pendingSummonKind == summonKind then
             chosenMountID = pendingMountID
         end
 
@@ -682,7 +729,18 @@ function ns.summonNextFavoriteMount()
             remaining = ns.db.remainingMountIDs[summonKind] or {}
             usableRemainingBase = CycleState.filterUsableMounts(remaining, usableLookup)
             usableRemaining = filterOutPendingMount(usableRemainingBase)
-            if #usableRemaining == 0 and #usableRemainingBase > 0 and hasPendingSummon() and pendingSummonKind == summonKind then
+            if forceSkip and activeMountID then
+                local filteredBase = filterOutMountID(usableRemainingBase, activeMountID)
+                local filtered = filterOutMountID(usableRemaining, activeMountID)
+                if #filteredBase > 0 then
+                    usableRemainingBase = filteredBase
+                end
+                if #filtered > 0 then
+                    usableRemaining = filtered
+                end
+            end
+            if (not forceSkip) and #usableRemaining == 0 and #usableRemainingBase > 0
+                and hasPendingSummon() and pendingSummonKind == summonKind then
                 chosenMountID = pendingMountID
             end
         end
@@ -690,6 +748,12 @@ function ns.summonNextFavoriteMount()
         if not chosenMountID and #usableRemaining == 0 then
             usableRemaining = CycleState.filterUsableMounts(remaining, usableLookup)
             usableRemaining = filterOutPendingMount(usableRemaining)
+            if forceSkip and activeMountID then
+                local filtered = filterOutMountID(usableRemaining, activeMountID)
+                if #filtered > 0 then
+                    usableRemaining = filtered
+                end
+            end
             if #usableRemaining == 0 then
                 ns.printMessage("No usable favorite mounts are queued for that pool right now.", true)
                 return
@@ -723,6 +787,12 @@ function ns.summonNextFavoriteMount()
         if #candidatePool == 0 then
             candidatePool = usablePool
         end
+        if forceSkip and activeMountID then
+            local candidateWithoutActive = filterOutMountID(candidatePool, activeMountID)
+            if #candidateWithoutActive > 0 then
+                candidatePool = candidateWithoutActive
+            end
+        end
         debugSelectionMessage(
             string.format(
                 "Random selection using %d candidate mounts (%d usable total).",
@@ -749,6 +819,14 @@ function ns.summonNextFavoriteMount()
         .. formatPoolLabel(summonKind) .. " pool."
     )
     C_MountJournal.SummonByID(chosenMountID)
+end
+
+function ns.summonNextFavoriteMount()
+    summonNextFavoriteMountInternal(false)
+end
+
+function ns.skipToNextFavoriteMount()
+    summonNextFavoriteMountInternal(true)
 end
 
 --------------------------------------------------------------------------------

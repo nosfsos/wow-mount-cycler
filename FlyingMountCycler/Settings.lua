@@ -7,6 +7,21 @@ local function buildStatusText()
     return table.concat(lines, "\n")
 end
 
+local function formatDurationOptionLabel(minutes)
+    if minutes == 1 then
+        return "1 minute"
+    elseif minutes < 60 then
+        return minutes .. " minutes"
+    elseif minutes == 60 then
+        return "1 hour"
+    end
+
+    if (minutes % 60) == 0 then
+        return (minutes / 60) .. " hours"
+    end
+    return minutes .. " minutes"
+end
+
 --------------------------------------------------------------------------------
 -- Settings panel (Retail Settings API)
 --------------------------------------------------------------------------------
@@ -131,13 +146,7 @@ function ns.registerSettings()
         local function lockDurationOptions()
             local container = Settings.CreateControlTextContainer()
             for _, minutes in ipairs(ns.MOUNT_LOCK_DURATIONS) do
-                if minutes < 60 then
-                    container:Add(minutes, minutes .. " minutes")
-                elseif minutes == 60 then
-                    container:Add(minutes, "1 hour")
-                else
-                    container:Add(minutes, (minutes / 60) .. " hours")
-                end
+                container:Add(minutes, formatDurationOptionLabel(minutes))
             end
             return container:GetData()
         end
@@ -149,6 +158,7 @@ function ns.registerSettings()
         local durationInit = Settings.CreateDropdown(
             category, durationSetting, lockDurationOptions,
             "How long to keep the same mount before cycling to the next one."
+            .. "\n\nUse the custom minutes field in Cycle Tools for any value from 1 to 1440."
         )
         durationInit:SetParentInitializer(lockInit, function()
             return opts.mountLockEnabled
@@ -210,6 +220,18 @@ function ns.registerSettings()
     resetBtn:SetText("Reset Cycle")
     resetBtn:SetScript("OnClick", function() ns.resetCycle("reset button used") end)
 
+    local skipBtn = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    skipBtn:SetPoint("LEFT", resetBtn, "RIGHT", 12, 0)
+    skipBtn:SetSize(140, 24)
+    skipBtn:SetText("Skip / Next Mount")
+    skipBtn:SetScript("OnClick", function()
+        if UnitAffectingCombat("player") then
+            ns.warnCannotMountInCombat()
+            return
+        end
+        ns.skipToNextFavoriteMount()
+    end)
+
     local resetFlyingBtn = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
     resetFlyingBtn:SetPoint("TOPLEFT", refreshBtn, "BOTTOMLEFT", 0, -10)
     resetFlyingBtn:SetSize(105, 24)
@@ -228,8 +250,43 @@ function ns.registerSettings()
     resetAnyBtn:SetText("Reset Any")
     resetAnyBtn:SetScript("OnClick", function() ns.resetCyclePool("any", "reset any button used") end)
 
+    local customDurationTitle = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    customDurationTitle:SetPoint("TOPLEFT", resetFlyingBtn, "BOTTOMLEFT", 0, -14)
+    customDurationTitle:SetText("Custom lock duration (minutes, 1-1440)")
+
+    local customDurationEdit = CreateFrame("EditBox", nil, refreshFrame, "InputBoxTemplate")
+    customDurationEdit:SetPoint("TOPLEFT", customDurationTitle, "BOTTOMLEFT", 0, -8)
+    customDurationEdit:SetSize(80, 24)
+    customDurationEdit:SetAutoFocus(false)
+    customDurationEdit:SetNumeric(true)
+    customDurationEdit:SetMaxLetters(4)
+
+    local applyCustomDurationBtn = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    applyCustomDurationBtn:SetPoint("LEFT", customDurationEdit, "RIGHT", 8, 0)
+    applyCustomDurationBtn:SetSize(160, 24)
+    applyCustomDurationBtn:SetText("Apply Custom Duration")
+    applyCustomDurationBtn:SetScript("OnClick", function()
+        local rawValue = tonumber(customDurationEdit:GetText() or "")
+        if not rawValue then
+            ns.printMessage("Enter a number between 1 and 1440 minutes.", true)
+            return
+        end
+        local clamped = math.max(1, math.min(1440, math.floor(rawValue)))
+        ns.db.options.mountLockDuration = clamped
+        customDurationEdit:SetText(tostring(clamped))
+        ns.printMessage("Mount lock duration set to " .. clamped .. " minutes.", true)
+    end)
+
+    customDurationEdit:SetScript("OnEnterPressed", function(self)
+        applyCustomDurationBtn:Click()
+        self:ClearFocus()
+    end)
+    customDurationEdit:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+    end)
+
     local statusTitle = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    statusTitle:SetPoint("TOPLEFT", resetFlyingBtn, "BOTTOMLEFT", 0, -18)
+    statusTitle:SetPoint("TOPLEFT", customDurationEdit, "BOTTOMLEFT", 0, -16)
     statusTitle:SetText("Current cycle status")
 
     local statusText = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
@@ -239,15 +296,21 @@ function ns.registerSettings()
     statusText:SetJustifyV("TOP")
 
     local function refreshCycleToolsSummary()
+        local lockEnabled = ns.db.options.mountLockEnabled
+        customDurationEdit:SetEnabled(lockEnabled)
+        applyCustomDurationBtn:SetEnabled(lockEnabled)
+        customDurationEdit:SetText(tostring(ns.db.options.mountLockDuration or ns.DEFAULT_OPTIONS.mountLockDuration))
         statusText:SetText(buildStatusText())
     end
 
     refreshFrame:SetScript("OnShow", refreshCycleToolsSummary)
     refreshBtn:HookScript("OnClick", refreshCycleToolsSummary)
     resetBtn:HookScript("OnClick", refreshCycleToolsSummary)
+    skipBtn:HookScript("OnClick", refreshCycleToolsSummary)
     resetFlyingBtn:HookScript("OnClick", refreshCycleToolsSummary)
     resetGroundBtn:HookScript("OnClick", refreshCycleToolsSummary)
     resetAnyBtn:HookScript("OnClick", refreshCycleToolsSummary)
+    applyCustomDurationBtn:HookScript("OnClick", refreshCycleToolsSummary)
 
     Settings.RegisterCanvasLayoutSubcategory(category, refreshFrame, "Cycle Tools")
 end

@@ -8,6 +8,7 @@ A World of Warcraft Retail addon that cycles through your favorite mounts withou
 - **Pool-aware** — automatically picks flying-type mounts in flyable areas, ground-type elsewhere (configurable)
 - **Skyriding support** — optionally includes dragonriding / skyriding families in the flying pool
 - **Recent-history avoidance** — optionally avoid the last few mounts when full no-repeat mode is disabled
+- **Mount lock timer** — keep the same mount for a configurable duration with preset options and a custom 1-1440 minute input
 - **Cycle status tools** — inspect live pool counts, lock state, and pending summons from slash commands or settings
 - **Debug selection mode** — print pool resolution and summon reasoning to chat when troubleshooting
 - **Addon Compartment** — left-click the minimap button to open settings, right-click to summon
@@ -18,6 +19,8 @@ A World of Warcraft Retail addon that cycles through your favorite mounts withou
 | Command | Action |
 |---|---|
 | `/fmount` | Summon the next mount (or dismount in combat) |
+| `/fmount skip` | Force next mount now (bypass current lock one time) |
+| `/fmount next` | Alias of `/fmount skip` |
 | `/fmount reset` | Reset all cycle queues and start fresh |
 | `/fmount reset flying` | Reset only one pool (`flying`, `ground`, or `any`) |
 | `/fmount refresh` | Refresh available mounts without losing progress |
@@ -71,6 +74,12 @@ The tests use `lupa` to exercise the queue and summon-selection logic outside th
 1. Enable **Flying Mount Cycler** in the AddOns menu.
 2. Use `/fmount` each time you want the next mount.
 3. Optional: place `/fmount` in a macro on your action bar.
+
+## Lock Timer Notes
+
+- Preset lock durations are available in settings.
+- A custom lock duration can be set in Cycle Tools from 1 to 1440 minutes.
+- Remaining lock time displays in minutes while above 60 seconds, then switches to seconds at 60 or less.
 
 ## Notes
 
