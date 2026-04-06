@@ -210,8 +210,26 @@ function ns.registerSettings()
     resetBtn:SetText("Reset Cycle")
     resetBtn:SetScript("OnClick", function() ns.resetCycle("reset button used") end)
 
+    local resetFlyingBtn = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    resetFlyingBtn:SetPoint("TOPLEFT", refreshBtn, "BOTTOMLEFT", 0, -10)
+    resetFlyingBtn:SetSize(105, 24)
+    resetFlyingBtn:SetText("Reset Flying")
+    resetFlyingBtn:SetScript("OnClick", function() ns.resetCyclePool("flying", "reset flying button used") end)
+
+    local resetGroundBtn = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    resetGroundBtn:SetPoint("LEFT", resetFlyingBtn, "RIGHT", 8, 0)
+    resetGroundBtn:SetSize(105, 24)
+    resetGroundBtn:SetText("Reset Ground")
+    resetGroundBtn:SetScript("OnClick", function() ns.resetCyclePool("ground", "reset ground button used") end)
+
+    local resetAnyBtn = CreateFrame("Button", nil, refreshFrame, "UIPanelButtonTemplate")
+    resetAnyBtn:SetPoint("LEFT", resetGroundBtn, "RIGHT", 8, 0)
+    resetAnyBtn:SetSize(105, 24)
+    resetAnyBtn:SetText("Reset Any")
+    resetAnyBtn:SetScript("OnClick", function() ns.resetCyclePool("any", "reset any button used") end)
+
     local statusTitle = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-    statusTitle:SetPoint("TOPLEFT", refreshBtn, "BOTTOMLEFT", 0, -18)
+    statusTitle:SetPoint("TOPLEFT", resetFlyingBtn, "BOTTOMLEFT", 0, -18)
     statusTitle:SetText("Current cycle status")
 
     local statusText = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
@@ -227,6 +245,9 @@ function ns.registerSettings()
     refreshFrame:SetScript("OnShow", refreshCycleToolsSummary)
     refreshBtn:HookScript("OnClick", refreshCycleToolsSummary)
     resetBtn:HookScript("OnClick", refreshCycleToolsSummary)
+    resetFlyingBtn:HookScript("OnClick", refreshCycleToolsSummary)
+    resetGroundBtn:HookScript("OnClick", refreshCycleToolsSummary)
+    resetAnyBtn:HookScript("OnClick", refreshCycleToolsSummary)
 
     Settings.RegisterCanvasLayoutSubcategory(category, refreshFrame, "Cycle Tools")
 end
