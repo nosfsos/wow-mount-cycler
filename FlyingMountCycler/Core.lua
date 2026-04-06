@@ -23,6 +23,10 @@ local function ensureCycleMountIDsShape(target)
     end
 end
 
+local function ensureRecentMountIDsShape(target)
+    target.recentMountIDs = target.recentMountIDs or {}
+end
+
 local function mergeDefaults(target)
     target.options = target.options or {}
     for key, value in pairs(ns.DEFAULT_OPTIONS) do
@@ -47,6 +51,7 @@ local eventHandlers = {
 
         ensureRemainingMountIDsShape(ns.db)
         ensureCycleMountIDsShape(ns.db)
+        ensureRecentMountIDsShape(ns.db)
         mergeDefaults(ns.db)
 
         ns.refreshAvailableMounts(false)
@@ -55,7 +60,10 @@ local eventHandlers = {
         ns.printMessage(
             "Loaded. |cffaaaaaa/fmount|r — next mount, "
             .. "|cffaaaaaa/fmount reset|r — reset cycle, "
+            .. "|cffaaaaaa/fmount reset flying|r — reset one pool, "
             .. "|cffaaaaaa/fmount refresh|r — refresh mounts, "
+            .. "|cffaaaaaa/fmount status|r — cycle status, "
+            .. "|cffaaaaaa/fmount debug|r — toggle debug, "
             .. "|cffaaaaaa/fmount unlock|r — clear mount lock, "
             .. "|cffaaaaaa/fmount config|r — options."
         )
@@ -99,15 +107,50 @@ SLASH_FLYINGMOUNTCYCLER1 = "/fmount"
 SLASH_FLYINGMOUNTCYCLER2 = "/flyingmount"
 SLASH_FLYINGMOUNTCYCLER3 = "/fmc"
 
+function ns.runDefaultMountAction()
+    if UnitAffectingCombat("player") then
+        if IsMounted() then
+            ns.dismountIfMounted()
+        else
+            ns.warnCannotMountInCombat()
+        end
+        return
+    end
+
+    ns.summonNextFavoriteMount()
+end
+
 SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
-    local command = strlower(strtrim(msg or ""))
+    local normalized = strlower(strtrim(msg or ""))
+    local command, argument = normalized:match("^(%S+)%s*(.-)%s*$")
+    command = command or ""
 
     if command == "reset" then
-        ns.resetCycle("reset command used")
+        if argument ~= "" then
+            ns.resetCyclePool(argument, "reset command used")
+        else
+            ns.resetCycle("reset command used")
+        end
         return
     end
     if command == "refresh" then
         ns.refreshAvailableMounts(true)
+        return
+    end
+    if command == "status" then
+        local lines = ns.getStatusReportLines()
+        for i = 1, #lines do
+            ns.printMessage(lines[i], true)
+        end
+        return
+    end
+    if command == "debug" then
+        ns.db.options.showDebugMessages = not ns.db.options.showDebugMessages
+        ns.printMessage(
+            "Debug selection messages "
+                .. (ns.db.options.showDebugMessages and "enabled." or "disabled."),
+            true
+        )
         return
     end
     if command == "unlock" then
@@ -120,14 +163,5 @@ SlashCmdList.FLYINGMOUNTCYCLER = function(msg)
         return
     end
 
-    if UnitAffectingCombat("player") then
-        if IsMounted() then
-            ns.dismountIfMounted()
-        else
-            ns.warnCannotMountInCombat()
-        end
-        return
-    end
-
-    ns.summonNextFavoriteMount()
+    ns.runDefaultMountAction()
 end

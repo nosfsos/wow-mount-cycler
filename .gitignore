@@ -29,6 +29,3 @@ pkg/
 # Python (e.g. addon-adjacent test tooling)
 __pycache__/
 *.py[cod]
-
-# Local test runner convenience script
-scripts/run-tests.ps1

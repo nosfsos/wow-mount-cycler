@@ -25,14 +25,17 @@ ns.ZONE_MODE = {
 }
 
 ns.MOUNT_LOCK_DURATIONS = { 5, 15, 30, 60, 120 }
+ns.RECENT_HISTORY_COUNTS = { 0, 1, 3, 5 }
 
 ns.DEFAULT_OPTIONS = {
     zoneMode              = ns.ZONE_MODE.AUTO,
     includeSkyriding      = true,
     cycleWithoutRepeats   = true,
+    recentHistoryCount    = 0,
     showCycleRemainingChat = true,
     showResetAnnouncements = true,
     showChatMessages      = true,
+    showDebugMessages     = false,
     mountLockEnabled      = false,
     mountLockDuration     = 15,
 }

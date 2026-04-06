@@ -7,6 +7,9 @@ A World of Warcraft Retail addon that cycles through your favorite mounts withou
 - **No-repeat cycling** — every favorite gets used before any mount repeats
 - **Pool-aware** — automatically picks flying-type mounts in flyable areas, ground-type elsewhere (configurable)
 - **Skyriding support** — optionally includes dragonriding / skyriding families in the flying pool
+- **Recent-history avoidance** — optionally avoid the last few mounts when full no-repeat mode is disabled
+- **Cycle status tools** — inspect live pool counts, lock state, and pending summons from slash commands or settings
+- **Debug selection mode** — print pool resolution and summon reasoning to chat when troubleshooting
 - **Addon Compartment** — left-click the minimap button to open settings, right-click to summon
 - **Settings panel** — full options in Esc > Options > AddOns > Flying Mount Cycler
 
@@ -16,7 +19,10 @@ A World of Warcraft Retail addon that cycles through your favorite mounts withou
 |---|---|
 | `/fmount` | Summon the next mount (or dismount in combat) |
 | `/fmount reset` | Reset all cycle queues and start fresh |
+| `/fmount reset flying` | Reset only one pool (`flying`, `ground`, or `any`) |
 | `/fmount refresh` | Refresh available mounts without losing progress |
+| `/fmount status` | Print the current pool counts, lock state, and active mode |
+| `/fmount debug` | Toggle debug selection messages |
 | `/fmount config` | Open the settings panel |
 
 Aliases: `/flyingmount`, `/fmc`
@@ -28,6 +34,7 @@ FlyingMountCycler/
 ├── FlyingMountCycler.toc   # Addon metadata & load order
 ├── Init.lua                # Shared namespace, constants, defaults
 ├── Utils.lua               # Messaging helpers, array utilities
+├── CycleState.lua          # Pure cycle state transitions
 ├── MountPool.lua           # Pool building, cycle management, summoning
 ├── Settings.lua            # Settings UI, addon compartment (minimap)
 └── Core.lua                # Event dispatch, slash commands, initialization
@@ -48,6 +55,16 @@ Files communicate through the addon namespace table (`local addonName, ns = ...`
    .\scripts\install-addon.ps1
    ```
    This creates a junction from your WoW `AddOns` directory so file changes are reflected instantly.
+
+## Testing
+
+Run the automated test suite with:
+
+```powershell
+.\scripts\run-tests.ps1
+```
+
+The tests use `lupa` to exercise the queue and summon-selection logic outside the WoW client.
 
 ## In-Game Usage
 

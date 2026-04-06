@@ -2,6 +2,11 @@ local _, ns = ...
 
 local settingsCategory
 
+local function buildStatusText()
+    local lines = ns.getStatusReportLines and ns.getStatusReportLines() or {}
+    return table.concat(lines, "\n")
+end
+
 --------------------------------------------------------------------------------
 -- Settings panel (Retail Settings API)
 --------------------------------------------------------------------------------
@@ -82,6 +87,33 @@ function ns.registerSettings()
             return opts.cycleWithoutRepeats
         end)
         remainInit:Indent()
+
+        local function recentHistoryOptions()
+            local container = Settings.CreateControlTextContainer()
+            for _, count in ipairs(ns.RECENT_HISTORY_COUNTS) do
+                if count == 0 then
+                    container:Add(count, "Disabled")
+                elseif count == 1 then
+                    container:Add(count, "Avoid the last mount")
+                else
+                    container:Add(count, "Avoid the last " .. count .. " mounts")
+                end
+            end
+            return container:GetData()
+        end
+        local recentSetting = Settings.RegisterAddOnSetting(
+            category, "FMC_RecentHistoryCount", "recentHistoryCount", opts,
+            type(DEFAULT_OPTIONS.recentHistoryCount), "Recent-history avoidance",
+            DEFAULT_OPTIONS.recentHistoryCount
+        )
+        local recentInit = Settings.CreateDropdown(
+            category, recentSetting, recentHistoryOptions,
+            "When no-repeat cycling is disabled, try to avoid recently used mounts before falling back to the full usable pool."
+        )
+        recentInit:SetParentInitializer(cycleInit, function()
+            return not opts.cycleWithoutRepeats
+        end)
+        recentInit:Indent()
     end
 
     -- "Lock mount for duration" with nested duration dropdown
@@ -138,6 +170,13 @@ function ns.registerSettings()
         "Show optional chat feedback when the addon loads or when you refresh mounts."
     )
 
+    registerCheckbox(
+        category, opts,
+        "FMC_ShowDebugMessages", "showDebugMessages",
+        "Debug selection messages",
+        "Print selection reasoning, resolved pool, and chosen mount details to chat for troubleshooting."
+    )
+
     Settings.RegisterAddOnCategory(category)
     settingsCategory = category
 
@@ -171,6 +210,24 @@ function ns.registerSettings()
     resetBtn:SetText("Reset Cycle")
     resetBtn:SetScript("OnClick", function() ns.resetCycle("reset button used") end)
 
+    local statusTitle = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+    statusTitle:SetPoint("TOPLEFT", refreshBtn, "BOTTOMLEFT", 0, -18)
+    statusTitle:SetText("Current cycle status")
+
+    local statusText = refreshFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    statusText:SetPoint("TOPLEFT", statusTitle, "BOTTOMLEFT", 0, -8)
+    statusText:SetWidth(520)
+    statusText:SetJustifyH("LEFT")
+    statusText:SetJustifyV("TOP")
+
+    local function refreshCycleToolsSummary()
+        statusText:SetText(buildStatusText())
+    end
+
+    refreshFrame:SetScript("OnShow", refreshCycleToolsSummary)
+    refreshBtn:HookScript("OnClick", refreshCycleToolsSummary)
+    resetBtn:HookScript("OnClick", refreshCycleToolsSummary)
+
     Settings.RegisterCanvasLayoutSubcategory(category, refreshFrame, "Cycle Tools")
 end
 
@@ -188,7 +245,7 @@ function FlyingMountCycler_OnAddonCompartmentClick(_, mouseButton)
     if mouseButton == "LeftButton" then
         ns.openAddonSettings()
     elseif mouseButton == "RightButton" then
-        ns.summonNextFavoriteMount()
+        ns.runDefaultMountAction()
     end
 end
 
@@ -197,6 +254,10 @@ function FlyingMountCycler_OnAddonCompartmentEnter(_, menuButtonFrame)
     GameTooltip:SetText("Flying Mount Cycler")
     GameTooltip:AddLine("|cffffffffLeft-click|r to open settings", 1, 1, 1)
     GameTooltip:AddLine("|cffffffffRight-click|r to summon next mount", 1, 1, 1)
+    local lines = ns.getStatusReportLines and ns.getStatusReportLines() or {}
+    for i = 1, #lines do
+        GameTooltip:AddLine(lines[i], 0.85, 0.85, 0.85)
+    end
     GameTooltip:Show()
 end
 

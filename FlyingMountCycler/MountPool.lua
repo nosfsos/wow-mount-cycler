@@ -10,6 +10,10 @@ local GetTime = GetTime
 local CycleState = ns.CycleState
 local ZONE_MODE = ns.ZONE_MODE
 local POOL_KEYS = ns.POOL_KEYS
+local RECENT_HISTORY_COUNTS = ns.RECENT_HISTORY_COUNTS
+
+local PENDING_SUMMON_TIMEOUT = 3
+local LOCK_MESSAGE_THROTTLE_SECONDS = 2
 
 --------------------------------------------------------------------------------
 -- Mount lock (session-only): keep the same mount for a configurable duration
@@ -18,6 +22,11 @@ local POOL_KEYS = ns.POOL_KEYS
 local lockedMountID
 local lockedAtTime
 local lockedSummonKind
+local lastLockMessageMountID
+local lastLockMessageAt
+local pendingMountID
+local pendingSummonKind
+local pendingSummonAtTime
 
 local function isMountLockActive()
     local db = ns.db
@@ -42,6 +51,8 @@ function ns.clearMountLock()
     lockedMountID = nil
     lockedAtTime = nil
     lockedSummonKind = nil
+    lastLockMessageMountID = nil
+    lastLockMessageAt = nil
 end
 
 function ns.getMountLockTimeRemaining()
@@ -51,6 +62,131 @@ function ns.getMountLockTimeRemaining()
     local elapsed = GetTime() - lockedAtTime
     local duration = (ns.db.options.mountLockDuration or 15) * 60
     return math.max(0, duration - elapsed)
+end
+
+local function clearPendingSummon()
+    pendingMountID = nil
+    pendingSummonKind = nil
+    pendingSummonAtTime = nil
+end
+
+local function hasPendingSummon()
+    if not pendingMountID or not pendingSummonAtTime then
+        return false
+    end
+    if (GetTime() - pendingSummonAtTime) >= PENDING_SUMMON_TIMEOUT then
+        clearPendingSummon()
+        return false
+    end
+    return true
+end
+
+local function setPendingSummon(mountID, summonKind)
+    pendingMountID = mountID
+    pendingSummonKind = summonKind
+    pendingSummonAtTime = GetTime()
+end
+
+local function isPendingMountReserved(mountID)
+    return hasPendingSummon() and pendingMountID == mountID
+end
+
+local function filterOutPendingMount(source)
+    if not hasPendingSummon() then
+        return source
+    end
+    local filtered = {}
+    for i = 1, #source do
+        local mountID = source[i]
+        if mountID ~= pendingMountID then
+            filtered[#filtered + 1] = mountID
+        end
+    end
+    return filtered
+end
+
+local function getMaxRecentHistoryCount()
+    return RECENT_HISTORY_COUNTS[#RECENT_HISTORY_COUNTS] or 0
+end
+
+local function ensureRecentMountHistory()
+    local db = ns.db
+    db.recentMountIDs = db.recentMountIDs or {}
+    return db.recentMountIDs
+end
+
+local function trimRecentMountHistory()
+    local recent = ensureRecentMountHistory()
+    local maxCount = getMaxRecentHistoryCount()
+    while #recent > maxCount do
+        table.remove(recent)
+    end
+end
+
+local function pushRecentMountID(mountID)
+    local recent = ensureRecentMountHistory()
+    for i = 1, #recent do
+        if recent[i] == mountID then
+            table.remove(recent, i)
+            break
+        end
+    end
+    table.insert(recent, 1, mountID)
+    trimRecentMountHistory()
+end
+
+local function getRecentMountLookup(limit)
+    if not limit or limit <= 0 then
+        return nil
+    end
+    local recent = ensureRecentMountHistory()
+    local lookup = {}
+    local maxIndex = math.min(limit, #recent)
+    for i = 1, maxIndex do
+        lookup[recent[i]] = true
+    end
+    return lookup
+end
+
+local function filterOutRecentMounts(source, limit)
+    local recentLookup = getRecentMountLookup(limit)
+    if not recentLookup then
+        return source
+    end
+    local filtered = {}
+    for i = 1, #source do
+        local mountID = source[i]
+        if not recentLookup[mountID] then
+            filtered[#filtered + 1] = mountID
+        end
+    end
+    return filtered
+end
+
+local function formatPoolLabel(poolKey)
+    if poolKey == "flying" then
+        return "flying"
+    elseif poolKey == "ground" then
+        return "ground"
+    end
+    return "any-favorite"
+end
+
+local function formatResolvedModeLabel(poolKey)
+    if poolKey == "flying" then
+        return "Flying favorites"
+    elseif poolKey == "ground" then
+        return "Ground favorites"
+    end
+    return "Any favorite"
+end
+
+local function debugSelectionMessage(text)
+    local db = ns.db
+    if not db or not db.options or db.options.showDebugMessages ~= true then
+        return
+    end
+    ns.printMessage("Debug: " .. text, true)
 end
 
 --------------------------------------------------------------------------------
@@ -227,7 +363,7 @@ local function announceNoRepeatCycleProgress(mountID)
     )
 end
 
-local function mountQualifiesForNoRepeatSync(mountID)
+local function mountQualifiesForTracking(mountID)
     for _, poolKey in ipairs(POOL_KEYS) do
         if isFavoriteInPoolIgnoringUsable(poolKey, mountID) then
             return true
@@ -236,9 +372,9 @@ local function mountQualifiesForNoRepeatSync(mountID)
     return false
 end
 
-local function processMountedForNoRepeatCycle()
+local function processMountedState()
     local db = ns.db
-    if not db or not db.options or not db.options.cycleWithoutRepeats then
+    if not db or not db.options then
         return
     end
     if not IsMounted() then
@@ -249,26 +385,41 @@ local function processMountedForNoRepeatCycle()
     if not mountID then
         return
     end
-    if not mountQualifiesForNoRepeatSync(mountID) then
+    if hasPendingSummon() and mountID ~= pendingMountID then
+        clearPendingSummon()
+    end
+    if not mountQualifiesForTracking(mountID) then
         return
     end
     if mountID == lastProcessedNoRepeatMountID then
+        if hasPendingSummon() and mountID == pendingMountID then
+            clearPendingSummon()
+        end
         return
     end
 
     lastProcessedNoRepeatMountID = mountID
-    removeMountFromAllCycleQueues(mountID)
-    announceNoRepeatCycleProgress(mountID)
+    pushRecentMountID(mountID)
+
+    if hasPendingSummon() and mountID == pendingMountID then
+        clearPendingSummon()
+    end
+
+    if db.options.cycleWithoutRepeats then
+        removeMountFromAllCycleQueues(mountID)
+        announceNoRepeatCycleProgress(mountID)
+    end
 end
 
 function ns.scheduleNoRepeatCycleUpdateFromMountState()
     if not IsMounted() then
         lastProcessedNoRepeatMountID = nil
+        hasPendingSummon()
         mountAnnounceDeferSeq = mountAnnounceDeferSeq + 1
         return
     end
     local db = ns.db
-    if not db or not db.options or not db.options.cycleWithoutRepeats then
+    if not db or not db.options then
         return
     end
 
@@ -278,7 +429,7 @@ function ns.scheduleNoRepeatCycleUpdateFromMountState()
         if seq ~= mountAnnounceDeferSeq then
             return
         end
-        processMountedForNoRepeatCycle()
+        processMountedState()
     end
 
     if TimerAfter then
@@ -339,9 +490,123 @@ local function resolveSummonKind()
     return IsFlyableArea() and "flying" or "ground"
 end
 
+function ns.getResolvedSummonKind()
+    return resolveSummonKind()
+end
+
+local function getPoolSnapshot(poolKey)
+    local fullPool = buildFavoritePool(poolKey, true)
+    local remaining = ((ns.db or {}).remainingMountIDs or {})[poolKey] or {}
+    local usablePool = buildFavoritePool(poolKey, false)
+    return {
+        poolKey = poolKey,
+        totalCount = #fullPool,
+        remainingCount = #remaining,
+        usableCount = #usablePool,
+    }
+end
+
+function ns.getCycleSummaryLines()
+    local lines = {}
+    for _, poolKey in ipairs(POOL_KEYS) do
+        local snapshot = getPoolSnapshot(poolKey)
+        lines[#lines + 1] = string.format(
+            "%s: %d queued / %d total (%d usable now)",
+            formatPoolLabel(snapshot.poolKey),
+            snapshot.remainingCount,
+            snapshot.totalCount,
+            snapshot.usableCount
+        )
+    end
+    return lines
+end
+
+function ns.getStatusReportLines()
+    local lines = {}
+    local db = ns.db
+    local options = db and db.options or {}
+    local summonKind = resolveSummonKind()
+    lines[#lines + 1] = "Current mode: " .. formatResolvedModeLabel(summonKind)
+
+    if isMountLockActive() then
+        lines[#lines + 1] = string.format(
+            "Mount lock: %s (%d sec remaining, %s pool)",
+            ns.getMountDisplayName(lockedMountID),
+            math.ceil(ns.getMountLockTimeRemaining()),
+            formatPoolLabel(lockedSummonKind)
+        )
+    elseif options.mountLockEnabled then
+        lines[#lines + 1] = "Mount lock: enabled, waiting for next summon"
+    else
+        lines[#lines + 1] = "Mount lock: disabled"
+    end
+
+    if hasPendingSummon() then
+        lines[#lines + 1] = "Pending summon: " .. ns.getMountDisplayName(pendingMountID)
+            .. " (" .. formatPoolLabel(pendingSummonKind) .. " pool)"
+    end
+
+    local recentCount = options.recentHistoryCount or 0
+    if recentCount > 0 and options.cycleWithoutRepeats ~= true then
+        lines[#lines + 1] = "Recent-history avoidance: enabled (" .. recentCount .. " recent mounts)"
+    elseif options.cycleWithoutRepeats ~= true then
+        lines[#lines + 1] = "Recent-history avoidance: disabled"
+    end
+
+    if options.showDebugMessages == true then
+        lines[#lines + 1] = "Debug selection messages: enabled"
+    end
+
+    local summaryLines = ns.getCycleSummaryLines()
+    for i = 1, #summaryLines do
+        lines[#lines + 1] = summaryLines[i]
+    end
+
+    return lines
+end
+
+local function clearSessionStateForReset()
+    clearPendingSummon()
+    ns.clearMountLock()
+    local db = ns.db
+    if db then
+        db.recentMountIDs = {}
+    end
+end
+
+local function normalizePoolKey(poolKey)
+    if poolKey == "flying" or poolKey == "ground" or poolKey == "any" then
+        return poolKey
+    end
+    return nil
+end
+
+function ns.resetCyclePool(poolKey, reason)
+    local normalizedPoolKey = normalizePoolKey(poolKey)
+    if not normalizedPoolKey then
+        ns.printMessage("Unknown pool '" .. tostring(poolKey) .. "'. Use flying, ground, or any.", true)
+        return false
+    end
+
+    setFreshCyclePool(normalizedPoolKey, buildFavoritePool(normalizedPoolKey, true))
+    clearPendingSummon()
+    if lockedSummonKind == normalizedPoolKey then
+        ns.clearMountLock()
+    end
+    announceCycleReset(reason or ("reset " .. normalizedPoolKey .. " pool"), { normalizedPoolKey })
+    return true
+end
+
 function ns.summonNextFavoriteMount()
     local summonKind = resolveSummonKind()
     local usablePool = buildFavoritePool(summonKind)
+    debugSelectionMessage(
+        string.format(
+            "Resolved %s pool with %d usable favorites.",
+            formatPoolLabel(summonKind),
+            #usablePool
+        )
+    )
     if #usablePool == 0 then
         if summonKind == "flying" then
             ns.printMessage("No usable favorite flying mounts match your filters.", true)
@@ -353,17 +618,49 @@ function ns.summonNextFavoriteMount()
         return
     end
 
+    if isMountLockActive() and lockedSummonKind ~= summonKind then
+        ns.clearMountLock()
+        ns.printMessage(
+            "Mount lock cleared because the active pool changed to " .. formatPoolLabel(summonKind) .. ".",
+            true
+        )
+    end
+
     if isMountLockActive() and lockedSummonKind == summonKind then
         local usableLookup = ns.poolToLookup(usablePool)
         if usableLookup[lockedMountID] then
-            local remaining = math.ceil(ns.getMountLockTimeRemaining() / 60)
-            ns.printCycleRemainingMessage(
-                "Mount locked: " .. ns.getMountDisplayName(lockedMountID)
-                .. " (" .. remaining .. " min remaining)."
-            )
+            local now = GetTime()
+            if lastLockMessageMountID ~= lockedMountID
+                or not lastLockMessageAt
+                or (now - lastLockMessageAt) >= LOCK_MESSAGE_THROTTLE_SECONDS then
+                local secondsRemaining = math.ceil(ns.getMountLockTimeRemaining())
+                ns.printCycleRemainingMessage(
+                    "Mount locked: " .. ns.getMountDisplayName(lockedMountID)
+                    .. " (" .. secondsRemaining .. " sec remaining)."
+                )
+                lastLockMessageMountID = lockedMountID
+                lastLockMessageAt = now
+            end
+            debugSelectionMessage("Reusing locked mount " .. ns.getMountDisplayName(lockedMountID) .. ".")
+            setPendingSummon(lockedMountID, summonKind)
             C_MountJournal.SummonByID(lockedMountID)
             return
         end
+        ns.clearMountLock()
+        ns.printMessage("Mount lock cleared because the locked mount is no longer usable in that pool.", true)
+    end
+
+    if hasPendingSummon() and pendingSummonKind == summonKind then
+        local usableLookup = ns.poolToLookup(usablePool)
+        if usableLookup[pendingMountID] then
+            debugSelectionMessage(
+                "Reusing pending summon " .. ns.getMountDisplayName(pendingMountID)
+                    .. " while mount state is still settling."
+            )
+            C_MountJournal.SummonByID(pendingMountID)
+            return
+        end
+        clearPendingSummon()
     end
 
     local chosenMountID
@@ -372,22 +669,71 @@ function ns.summonNextFavoriteMount()
         local remaining = ensureRemainingPoolReady(summonKind, fullPool)
 
         local usableLookup = ns.poolToLookup(usablePool)
-        local usableRemaining = CycleState.filterUsableMounts(remaining, usableLookup)
+        local usableRemainingBase = CycleState.filterUsableMounts(remaining, usableLookup)
+        local usableRemaining = filterOutPendingMount(usableRemainingBase)
 
-        if #usableRemaining == 0 then
+        if #usableRemaining == 0 and #usableRemainingBase > 0 and hasPendingSummon() and pendingSummonKind == summonKind then
+            chosenMountID = pendingMountID
+        end
+
+        if not chosenMountID and #usableRemaining == 0 then
             setFreshCyclePool(summonKind, fullPool)
             announceCycleReset("reached the end of the list", { summonKind })
             remaining = ns.db.remainingMountIDs[summonKind] or {}
+            usableRemainingBase = CycleState.filterUsableMounts(remaining, usableLookup)
+            usableRemaining = filterOutPendingMount(usableRemainingBase)
+            if #usableRemaining == 0 and #usableRemainingBase > 0 and hasPendingSummon() and pendingSummonKind == summonKind then
+                chosenMountID = pendingMountID
+            end
+        end
+
+        if not chosenMountID and #usableRemaining == 0 then
             usableRemaining = CycleState.filterUsableMounts(remaining, usableLookup)
+            usableRemaining = filterOutPendingMount(usableRemaining)
             if #usableRemaining == 0 then
                 ns.printMessage("No usable favorite mounts are queued for that pool right now.", true)
                 return
             end
         end
-        chosenMountID = usableRemaining[math.random(#usableRemaining)]
+        if not chosenMountID then
+            debugSelectionMessage(
+                string.format(
+                    "No-repeat selection using %d queued usable mounts from %s pool.",
+                    #usableRemaining,
+                    formatPoolLabel(summonKind)
+                )
+            )
+            chosenMountID = usableRemaining[math.random(#usableRemaining)]
+        else
+            debugSelectionMessage(
+                "Reusing pending summon " .. ns.getMountDisplayName(chosenMountID)
+                    .. " while mount state is still settling."
+            )
+        end
     else
-        chosenMountID = usablePool[math.random(#usablePool)]
+        local recentHistoryCount = ns.db.options.recentHistoryCount or 0
+        local candidatePool = usablePool
+        if recentHistoryCount > 0 then
+            local filteredPool = filterOutRecentMounts(candidatePool, recentHistoryCount)
+            if #filteredPool > 0 then
+                candidatePool = filteredPool
+            end
+        end
+        candidatePool = filterOutPendingMount(candidatePool)
+        if #candidatePool == 0 then
+            candidatePool = usablePool
+        end
+        debugSelectionMessage(
+            string.format(
+                "Random selection using %d candidate mounts (%d usable total).",
+                #candidatePool,
+                #usablePool
+            )
+        )
+        chosenMountID = candidatePool[math.random(#candidatePool)]
     end
+
+    setPendingSummon(chosenMountID, summonKind)
 
     if ns.db.options.mountLockEnabled then
         setMountLock(chosenMountID, summonKind)
@@ -398,6 +744,10 @@ function ns.summonNextFavoriteMount()
         )
     end
 
+    debugSelectionMessage(
+        "Summoning " .. ns.getMountDisplayName(chosenMountID) .. " from the "
+        .. formatPoolLabel(summonKind) .. " pool."
+    )
     C_MountJournal.SummonByID(chosenMountID)
 end
 
@@ -414,7 +764,7 @@ function ns.resetCycle(reason)
         setFreshCyclePool(poolKey, buildFavoritePool(poolKey, true))
     end
 
-    ns.clearMountLock()
+    clearSessionStateForReset()
     announceCycleReset(reason or "reset command used", POOL_KEYS)
 end
 
