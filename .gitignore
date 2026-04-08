@@ -29,3 +29,5 @@ pkg/
 # Python (e.g. addon-adjacent test tooling)
 __pycache__/
 *.py[cod]
+
+scripts/
