@@ -54,7 +54,6 @@ local eventHandlers = {
         ensureRecentMountIDsShape(ns.db)
         mergeDefaults(ns.db)
 
-        ns.refreshAvailableMounts(false)
         ns.registerSettings()
 
         ns.printMessage(
@@ -70,6 +69,11 @@ local eventHandlers = {
         )
 
         eventFrame:UnregisterEvent("ADDON_LOADED")
+    end,
+
+    PLAYER_LOGIN = function()
+        ns.refreshAvailableMounts(false)
+        eventFrame:UnregisterEvent("PLAYER_LOGIN")
     end,
 
     PLAYER_MOUNT_DISPLAY_CHANGED = function()

@@ -54,9 +54,20 @@ end
 function CycleState.syncPoolState(db, poolKey, pool)
     ensurePoolTables(db, poolKey)
 
-    local poolLookup = poolToLookup(pool)
     local prevCycle = db.cycleMountIDs[poolKey] or {}
     local prevRemaining = db.remainingMountIDs[poolKey] or {}
+
+    if #pool == 0 and #prevCycle > 0 then
+        return {
+            addedMounts = {},
+            addedCount = 0,
+            removedCount = 0,
+            cycle = prevCycle,
+            remaining = prevRemaining,
+        }
+    end
+
+    local poolLookup = poolToLookup(pool)
     local trackedCycle = retainOnlyCurrentPool(prevCycle, poolLookup)
     local remaining = retainOnlyCurrentPool(prevRemaining, poolLookup)
     local removedCount = #prevCycle - #trackedCycle
