@@ -83,6 +83,7 @@ The tests use `lupa` to exercise the queue and summon-selection logic outside th
 
 ## Notes
 
-- The addon targets Retail / Midnight (`## AllowLoadGameType: mainline`).
+- The addon is targeted to WoW Retail / Midnight `12.0.5` (`## Interface: 120005`, `## AllowLoadGameType: mainline`).
+- The current Midnight addon restrictions Blizzard has documented are combat-focused; this addon's mount-journal and settings usage remains within the supported non-combat UI model.
 - SavedVariables are stored account-wide in `FlyingMountCyclerDB`.
 - If Blizzard changes mount type IDs in future patches, update the lookup tables in `Init.lua`.

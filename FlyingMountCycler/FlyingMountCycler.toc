@@ -1,6 +1,6 @@
-## Interface: 120001, 120005, 120100
+## Interface: 120005
 ## Title: Flying Mount Cycler
-## Notes: Cycles favorite mounts by pool (flying / ground / any) without repeats. Options in Esc > Options > AddOns.
+## Notes: Midnight 12.0.5-ready favorite mount cycling by pool (flying / ground / any) without repeats. Options in Esc > Options > AddOns.
 ## Author: Yuri + Cursor
 ## Version: @project-version@
 ## Category: Mounts
