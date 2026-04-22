@@ -1,0 +1,7 @@
+package-as: FlyingMountCycler
+
+ignore:
+  - README.md
+  - requirements.txt
+  - patch-notes
+  - .luacheckrc
